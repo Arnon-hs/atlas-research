@@ -1,0 +1,11 @@
+{
+  "variable": "weights.quality",
+  "current_value": 1,
+  "minimum": 0,
+  "maximum": 2,
+  "metrics": {
+    "mae": 12.5,
+    "ndcg_at_10": 0.78,
+    "pairwise_accuracy": 0.72
+  }
+}
