@@ -10,7 +10,7 @@ import os
 import re
 import stat
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -153,8 +153,16 @@ class ReceiptLog:
         receipt: Mapping[str, object],
         *,
         not_after: datetime | None = None,
+        before_write: Callable[[ReceiptCommit, bytes | None], None] | None = None,
     ) -> ReceiptCommit:
-        """Commit one canonical receipt or return an exact prior replay."""
+        """Commit one canonical receipt or return an exact prior replay.
+
+        ``before_write`` runs under the receipt lock after the exact path,
+        bytes, digest, and replacement HEAD bytes are known but before durable
+        storage changes. A caller may use it to enforce an outer workspace
+        budget atomically with receipt admission. ``None`` HEAD bytes denote
+        an exact replay that needs no receipt-log mutation.
+        """
 
         proposed = dict(receipt)
         _validate_receipt_document(proposed)
@@ -181,7 +189,10 @@ class ReceiptLog:
                         "RECEIPT_REPLAY_CONFLICT",
                         "idempotency key is already bound to different receipt bytes",
                     )
-                return ReceiptCommit(stored.path, stored.data, stored.sha256, replayed=True)
+                replay = ReceiptCommit(stored.path, stored.data, stored.sha256, replayed=True)
+                if before_write is not None:
+                    before_write(replay, None)
+                return replay
 
             previous = entries[-1].sha256 if entries else None
             if proposed["previous_receipt_sha256"] != previous:
@@ -203,6 +214,10 @@ class ReceiptLog:
             receipt_id = cast(str, proposed["receipt_id"])
             path = self.entries_dir / f"{sequence:016d}-{receipt_id}.json"
             digest = hashlib.sha256(data).hexdigest()
+            head_data = _head_bytes(sequence, path.name, digest)
+            pending = ReceiptCommit(path, data, digest, replayed=False)
+            if before_write is not None:
+                before_write(pending, head_data)
             _exclusive_write(path, data)
             _fsync_directory(self.entries_dir)
             try:
@@ -373,12 +388,7 @@ class ReceiptLog:
             )
 
     def _write_head(self, sequence: int, filename: str, digest: str) -> None:
-        document: dict[str, object] = {
-            "filename": filename,
-            "sequence": sequence,
-            "sha256": digest,
-        }
-        data = canonical_json_bytes(document) + b"\n"
+        data = _head_bytes(sequence, filename, digest)
         temporary = self.root / f"head-{uuid.uuid4().hex}.tmp"
         try:
             _exclusive_write(temporary, data)
@@ -413,6 +423,15 @@ def canonical_result_sha256(canonical_result: object) -> str:
             "RECEIPT_RESULT_INVALID", "canonical result is not valid canonical JSON"
         ) from exc
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _head_bytes(sequence: int, filename: str, digest: str) -> bytes:
+    document: dict[str, object] = {
+        "filename": filename,
+        "sequence": sequence,
+        "sha256": digest,
+    }
+    return canonical_json_bytes(document) + b"\n"
 
 
 def _receipt_mapping(value: object, *, field: str) -> Mapping[str, object]:
@@ -501,14 +520,14 @@ def _validate_canonical_result(value: object) -> None:
     ):
         raise ReceiptValidationError("RECEIPT_RESULT_INVALID", "canonical reasons are invalid")
     if decision == "KEEP":
-        if not metrics or failed or all_gates is not True or reasons != ["ALL_GATES_PASSED"]:
+        if len(metrics) < 2 or failed or all_gates is not True or reasons != ["ALL_GATES_PASSED"]:
             raise ReceiptValidationError(
                 "RECEIPT_RESULT_INVALID", "KEEP gate semantics are invalid"
             )
         if "error" in result:
             raise ReceiptValidationError("RECEIPT_RESULT_INVALID", "KEEP cannot contain an error")
     elif decision == "DISCARD":
-        if not metrics or not failed or all_gates is not False or reasons != failed:
+        if len(metrics) < 2 or not failed or all_gates is not False or reasons != failed:
             raise ReceiptValidationError(
                 "RECEIPT_RESULT_INVALID", "DISCARD gate semantics are invalid"
             )
@@ -527,6 +546,7 @@ def _validate_canonical_result(value: object) -> None:
             or _CODE_RE.fullmatch(code) is None
             or not isinstance(message, str)
             or not 1 <= len(message.encode("utf-8")) <= 512
+            or reasons != [code]
         ):
             raise ReceiptValidationError("RECEIPT_RESULT_INVALID", "canonical error is invalid")
 

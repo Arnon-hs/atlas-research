@@ -2,7 +2,9 @@
 
 This directory is a deterministic, digest-pinned validation fixture. It contains
 only three invented scoring records and evaluates the public `validation` split.
-The expected outcome is `completed` / `KEEP` over one record.
+The Level 2 candidate changes one synthetic score weight. Its MAE and
+calibration-error gates both improve, so the expected outcome is `completed` /
+`KEEP` over one record.
 
 Use `job.json` as the job and this directory as the artifact root. Verify every
 committed byte against `bundle-manifest.json` before an external smoke run.

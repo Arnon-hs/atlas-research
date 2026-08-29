@@ -14,12 +14,12 @@ concurrency:
 
 jobs:
   quality:
-    name: Python ${{ matrix.python }} quality
-    runs-on: ubuntu-latest
+    name: Python ${{ matrix.python }} / Ubuntu 22.04 quality
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.14"]
+        python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Check out exact revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,10 +64,22 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
-      - name: Build from the lockfile
+      - name: Reproduce package bytes from the lockfile
         run: |
+          set -eu
           uv sync --locked --all-groups
-          uv build
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          first_build="$(mktemp -d "${RUNNER_TEMP:?}/atlas-build-one.XXXXXX")"
+          second_build="$(mktemp -d "${RUNNER_TEMP:?}/atlas-build-two.XXXXXX")"
+          trap 'rm -rf "$first_build" "$second_build"' EXIT HUP INT TERM
+          uv build --out-dir "$first_build"
+          uv build --out-dir "$second_build"
+          for artifact in "$first_build"/*; do
+            name="$(basename "$artifact")"
+            cmp "$artifact" "$second_build/$name"
+          done
+          mkdir -p dist
+          cp "$first_build"/* dist/
 
       - name: Install and run the wheel
         run: |

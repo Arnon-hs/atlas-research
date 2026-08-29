@@ -1,13 +1,4 @@
-.git
-.github
-.venv
-__pycache__
-.pytest_cache
-.ruff_cache
-.mypy_cache
-artifacts
-build
-reports
-tests
-workspaces
-*.egg-info
+**
+!Dockerfile
+!dist/
+!dist/atlas_research-*.whl

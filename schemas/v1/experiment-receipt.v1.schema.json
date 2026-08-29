@@ -187,11 +187,14 @@
           "if": { "properties": { "decision": { "const": "ERROR" } } },
           "then": {
             "required": ["error"],
-            "properties": { "all_gates_passed": { "const": false } }
+            "properties": {
+              "all_gates_passed": { "const": false },
+              "metrics": { "maxProperties": 0 }
+            }
           },
           "else": {
             "not": { "required": ["error"] },
-            "properties": { "metrics": { "minProperties": 1 } }
+            "properties": { "metrics": { "minProperties": 2 } }
           }
         },
         {

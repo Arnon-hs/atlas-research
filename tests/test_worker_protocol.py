@@ -68,6 +68,13 @@ def test_child_main_emits_success_and_safe_error_packets(
     assert "sensitive" not in json.dumps(crash)
 
 
+def test_malformed_child_stdout_is_normalized_to_protocol_failure() -> None:
+    with pytest.raises(ValidationError) as captured:
+        worker._packet_or_error(b"{not-json", _limits())
+
+    assert captured.value.code == "WORKER_PROTOCOL_INVALID"
+
+
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
 def test_preexec_applies_resource_ceilings_without_using_input(
     system: str,

@@ -35,7 +35,7 @@
     "metrics": {
       "type": "object",
       "additionalProperties": false,
-      "minProperties": 1,
+      "minProperties": 2,
       "maxProperties": 7,
       "properties": {
         "mae": { "$ref": "#/$defs/lower_100_metric" },

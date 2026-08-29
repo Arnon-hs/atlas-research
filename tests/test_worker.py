@@ -5,6 +5,8 @@ import copy
 import json
 import os
 import stat
+import subprocess
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -90,7 +92,12 @@ def _write_artifact(
     )
 
 
-def _build_graph(tmp_path: Path, *, candidate_weight: int) -> _Graph:
+def _build_graph(
+    tmp_path: Path,
+    *,
+    candidate_weight: int,
+    benchmark_workspace_bytes: int | None = None,
+) -> _Graph:
     if candidate_weight not in {0, 2}:
         raise ValueError("fixture supports only the KEEP and DISCARD candidates")
     artifact_root = ensure_private_directory(tmp_path / "artifacts")
@@ -197,7 +204,7 @@ def _build_graph(tmp_path: Path, *, candidate_weight: int) -> _Graph:
         "created_at": created_at,
         "status": "proposed",
         "parent_evaluation_payload": baseline_ref.to_mapping(),
-        "research_level": "LEVEL_1",
+        "research_level": "LEVEL_2",
         "hypothesis": "Change one bounded synthetic quality weight.",
         "changed_variable": {
             "path": "weights.quality",
@@ -220,6 +227,9 @@ def _build_graph(tmp_path: Path, *, candidate_weight: int) -> _Graph:
         schema_id=CANDIDATE_SCHEMA,
     )
 
+    benchmark_limits = _limits()
+    if benchmark_workspace_bytes is not None:
+        benchmark_limits["max_workspace_bytes"] = benchmark_workspace_bytes
     benchmark = {
         "schema_version": SCHEMA_VERSION,
         "benchmark_id": f"benchmark-{decision_name}",
@@ -231,10 +241,15 @@ def _build_graph(tmp_path: Path, *, candidate_weight: int) -> _Graph:
             "mae": {
                 "direction": "lower",
                 "gate": {"absolute_threshold": 0, "minimum_delta": 0},
-            }
+            },
+            "calibration_error": {
+                "direction": "lower",
+                "parameters": {"bins": 10},
+                "gate": {"absolute_threshold": 0, "minimum_delta": 0},
+            },
         },
         "minimum_records": {"train": 1, "validation": 1, "test": 1},
-        "limits": _limits(),
+        "limits": benchmark_limits,
     }
     _, benchmark_ref = _write_artifact(
         artifact_root,
@@ -332,6 +347,147 @@ def test_isolated_run_commits_private_result_receipt_and_replays_exactly(
     assert replay.path.read_bytes() == result_before
     assert receipt_path.read_bytes() == receipt_before
     assert ReceiptLog(output_root / "receipt-log").verify().entry_count == 1
+
+
+def test_admitted_evaluation_error_commits_terminal_error_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = _build_graph(tmp_path, candidate_weight=2)
+    output_root = ensure_private_directory(tmp_path / "output")
+    monkeypatch.setattr(
+        worker,
+        "_source_provenance",
+        lambda: SourceProvenance("a" * 40, "verified_checkout"),
+    )
+
+    def fail_evaluation(*_args: object, **_kwargs: object) -> object:
+        raise ValidationError("EVALUATION_INCOMPLETE", "Evaluation did not complete")
+
+    monkeypatch.setattr(worker, "_run_child", fail_evaluation)
+
+    outcome = run_isolated_job(
+        job_path=graph.job_path,
+        artifact_root=graph.artifact_root,
+        output_root=output_root,
+        result_uri="result.json",
+        identity=WorkerIdentity(worker_id="worker-test", session_id="session-test"),
+    )
+
+    assert outcome.result["status"] == "completed"
+    assert "error" not in outcome.result
+    receipts = ReceiptLog(output_root / "receipt-log").verified_receipts()
+    assert len(receipts) == 1
+    canonical_result = cast(Mapping[str, object], receipts[0]["canonical_result"])
+    assert canonical_result == {
+        "metrics": {},
+        "all_gates_passed": False,
+        "decision": "ERROR",
+        "reason_codes": ["EVALUATION_INCOMPLETE"],
+        "error": {
+            "code": "EVALUATION_INCOMPLETE",
+            "message": "Evaluation did not complete",
+        },
+    }
+
+    replay = run_isolated_job(
+        job_path=graph.job_path,
+        artifact_root=graph.artifact_root,
+        output_root=output_root,
+        result_uri="result.json",
+    )
+    assert replay.replayed is True
+    assert replay.path.read_bytes() == outcome.path.read_bytes()
+
+
+@pytest.mark.parametrize("code", ["INTERNAL_ERROR", "WORKER_PROTOCOL_INVALID"])
+def test_retryable_worker_failure_never_commits_terminal_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+) -> None:
+    graph = _build_graph(tmp_path, candidate_weight=2)
+    output_root = ensure_private_directory(tmp_path / "output")
+
+    def fail_worker(*_args: object, **_kwargs: object) -> object:
+        raise ValidationError(code, "Retryable worker failure")
+
+    monkeypatch.setattr(worker, "_run_child", fail_worker)
+
+    outcome = run_isolated_job(
+        job_path=graph.job_path,
+        artifact_root=graph.artifact_root,
+        output_root=output_root,
+        result_uri="result.json",
+    )
+
+    assert outcome.result["status"] == "rejected"
+    error = cast(Mapping[str, object], outcome.result["error"])
+    assert error == {"code": code, "message": "Retryable worker failure", "retryable": True}
+    assert list((output_root / "receipt-log" / "entries").iterdir()) == []
+
+
+def test_workspace_budget_blocks_receipt_and_result_before_durable_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = _build_graph(tmp_path, candidate_weight=2)
+    output_root = ensure_private_directory(tmp_path / "output")
+    original_preflight = worker._run_preflight
+
+    def tiny_workspace(*args: object, **kwargs: object) -> object:
+        limits = original_preflight(*args, **kwargs)  # type: ignore[arg-type]
+        return worker.EffectiveLimits(**{**limits.to_mapping(), "max_workspace_bytes": 64})
+
+    monkeypatch.setattr(worker, "_run_preflight", tiny_workspace)
+    monkeypatch.setattr(
+        worker,
+        "_source_provenance",
+        lambda: SourceProvenance("a" * 40, "verified_checkout"),
+    )
+
+    with pytest.raises(ResourceLimitError) as captured:
+        run_isolated_job(
+            job_path=graph.job_path,
+            artifact_root=graph.artifact_root,
+            output_root=output_root,
+            result_uri="result.json",
+        )
+
+    assert captured.value.code == "WORKSPACE_BYTES_EXCEEDED"
+    assert not (output_root / "result.json").exists()
+    assert list((output_root / "receipt-log" / "entries").iterdir()) == []
+
+
+def test_worker_lock_rejects_a_concurrent_process(tmp_path: Path) -> None:
+    output_root = ensure_private_directory(tmp_path / "output")
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("COV_CORE_")
+    }
+    script = """
+from pathlib import Path
+import sys
+from atlas_research.errors import ConflictError
+from atlas_research.worker import _single_worker
+try:
+    with _single_worker(Path(sys.argv[1])):
+        print("acquired")
+except ConflictError as error:
+    print(error.code)
+"""
+
+    with worker._single_worker(output_root):
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(output_root)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=environment,
+        )
+
+    assert completed.stdout.strip() == "WORKER_BUSY"
+    assert completed.stderr == ""
 
 
 def test_exact_terminal_result_replays_without_new_deadline_admission(
@@ -651,7 +807,12 @@ def test_head_update_failure_requires_recovery_without_rejected_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    graph = _build_graph(tmp_path, candidate_weight=2)
+    benchmark_workspace_bytes = 64 * 1024
+    graph = _build_graph(
+        tmp_path,
+        candidate_weight=2,
+        benchmark_workspace_bytes=benchmark_workspace_bytes,
+    )
     output_root = ensure_private_directory(tmp_path / "output")
     monkeypatch.setattr(
         worker,
@@ -678,6 +839,28 @@ def test_head_update_failure_requires_recovery_without_rejected_result(
     recovered = ReceiptLog(output_root / "receipt-log").verify(recover=True)
     assert recovered.recovered is True
     assert recovered.entry_count == 1
+
+    assert load_job(graph.job_path).limits.max_workspace_bytes == 1 << 20
+    assert (
+        worker._recovery_limits(load_job(graph.job_path), graph.artifact_root).max_workspace_bytes
+        == benchmark_workspace_bytes
+    )
+    pressure = atomic_write_private(
+        output_root,
+        "pressure.bin",
+        b"x" * (benchmark_workspace_bytes + 1),
+    )
+    with pytest.raises(ResourceLimitError) as recovery_error:
+        run_isolated_job(
+            job_path=graph.job_path,
+            artifact_root=graph.artifact_root,
+            output_root=output_root,
+            result_uri="result.json",
+        )
+
+    assert recovery_error.value.code == "WORKSPACE_BYTES_EXCEEDED"
+    assert not (output_root / "result.json").exists()
+    pressure.unlink()
 
     completed = run_isolated_job(
         job_path=graph.job_path,

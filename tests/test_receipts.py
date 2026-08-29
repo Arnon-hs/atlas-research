@@ -59,7 +59,13 @@ def _result(*, candidate: str = "0.4") -> dict[str, object]:
                 "candidate": candidate,
                 "candidate_minus_baseline": "-0.1",
                 "passed": True,
-            }
+            },
+            "calibration_error": {
+                "baseline": "0.2",
+                "candidate": "0.1",
+                "candidate_minus_baseline": "-0.1",
+                "passed": True,
+            },
         },
         "all_gates_passed": True,
         "decision": "KEEP",
@@ -313,6 +319,29 @@ def test_closed_receipt_semantics_reject_forged_evidence(tmp_path: Path, mutatio
 
     with pytest.raises(ReceiptValidationError):
         log.commit(invalid)
+
+    assert list((log.root / "entries").iterdir()) == []
+
+
+def test_error_receipt_reason_must_match_error_code(tmp_path: Path) -> None:
+    log = ReceiptLog(tmp_path / "receipts")
+    result: dict[str, object] = {
+        "metrics": {},
+        "all_gates_passed": False,
+        "decision": "ERROR",
+        "reason_codes": ["UNRELATED_REASON"],
+        "error": {"code": "ACTUAL_ERROR", "message": "Terminal evaluation error"},
+    }
+
+    with pytest.raises(ReceiptValidationError):
+        log.commit(
+            _receipt(
+                "receipt-1",
+                "idempotency-key-0001",
+                previous=None,
+                result=result,
+            )
+        )
 
     assert list((log.root / "entries").iterdir()) == []
 

@@ -6,6 +6,11 @@ identifiers.
 
 ## Compatibility
 
+The `schemas/v1/` contracts are provisional until the first tagged Atlas
+Research v0.1 release. Draft consumers must pin an exact commit and should
+expect corrections before that release. Starting with the first tagged release,
+the compatibility rules below are frozen for the published major version.
+
 - Adding an optional property is backward-compatible.
 - Removing or renaming a property, changing meaning, or narrowing accepted
   values requires a new major schema version.

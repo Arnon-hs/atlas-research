@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -65,6 +65,23 @@ _INSTALLED_PROVENANCE: Final = Path("/usr/local/share/atlas-research/source-prov
 _SAFE_RELATIVE: Final = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){0,15}$",
     re.ASCII,
+)
+_NON_RECEIPT_EXECUTION_ERRORS: Final = frozenset(
+    {
+        "INTERNAL_ERROR",
+        "JOB_EXPIRED",
+        "WORKER_OUTPUT_EXCEEDED",
+        "WORKER_PROTOCOL_INVALID",
+        "WORKER_TIMEOUT",
+    }
+)
+_RETRYABLE_EXECUTION_ERRORS: Final = frozenset(
+    {
+        "INTERNAL_ERROR",
+        "WORKER_OUTPUT_EXCEEDED",
+        "WORKER_PROTOCOL_INVALID",
+        "WORKER_TIMEOUT",
+    }
 )
 _BENCHMARK_FIELDS: Final = {
     "schema_version",
@@ -258,6 +275,15 @@ def _validate_benchmark_bindings(
                 "INVALID_BENCHMARK", "Benchmark minimum record counts are invalid"
             )
     return metrics, minimum_records
+
+
+def _recovery_limits(job: ResearchJob, artifact_root: Path) -> EffectiveLimits:
+    """Resolve the pinned benchmark ceiling without re-admitting the experiment."""
+
+    with ArtifactResolver(artifact_root) as resolver:
+        benchmark, limits = _benchmark_document(job, resolver)
+        _validate_benchmark_bindings(job, benchmark)
+    return limits
 
 
 def _candidate_document(
@@ -558,7 +584,8 @@ def preflight_main(job_snapshot: bytes, artifact_root: Path) -> int:
                 "Sealed test evaluation requires an external operator capability",
             )
         with ArtifactResolver(artifact_root) as resolver:
-            _, limits = _benchmark_document(job, resolver)
+            benchmark, limits = _benchmark_document(job, resolver)
+            _validate_benchmark_bindings(job, benchmark)
         packet: Mapping[str, object] = {"ok": True, "limits": limits.to_mapping()}
         exit_code = 0
     except AtlasResearchError as error:
@@ -660,12 +687,15 @@ def _communicate_child(
 def _packet_or_error(stdout: bytes, limits: EffectiveLimits) -> Mapping[str, object]:
     if len(stdout) > min(limits.max_output_bytes, 1 << 20):
         raise ResourceLimitError("WORKER_OUTPUT_EXCEEDED", "Worker output exceeded the limit")
-    parsed = strict_json_loads(
-        stdout,
-        max_bytes=min(limits.max_output_bytes, 1 << 20),
-        max_depth=limits.max_json_depth,
-        max_string_bytes=limits.max_string_bytes,
-    )
+    try:
+        parsed = strict_json_loads(
+            stdout,
+            max_bytes=min(limits.max_output_bytes, 1 << 20),
+            max_depth=limits.max_json_depth,
+            max_string_bytes=limits.max_string_bytes,
+        )
+    except AtlasResearchError as error:
+        raise ValidationError("WORKER_PROTOCOL_INVALID", "Worker packet is invalid") from error
     packet = _as_mapping(parsed, code="WORKER_PROTOCOL_INVALID", message="Worker packet is invalid")
     if packet.get("ok") is not True:
         error_mapping = _as_mapping(
@@ -753,6 +783,34 @@ def _run_child(
         records_evaluated=cast(int, packet["records_evaluated"]),
         peak_rss_bytes=cast(int, packet["peak_rss_bytes"]),
         canonical_result=cast(CanonicalResult, dict(canonical_result)),
+    )
+
+
+def _terminal_error_packet(
+    error: AtlasResearchError,
+    *,
+    started_at: str,
+    admitted_monotonic: float,
+) -> _EvaluationPacket:
+    """Represent an admitted, terminal evaluation failure as receipt evidence."""
+
+    elapsed = max(0, (time.monotonic_ns() - int(admitted_monotonic * 1_000_000_000)) // 1_000_000)
+    canonical_result = cast(
+        CanonicalResult,
+        {
+            "metrics": {},
+            "all_gates_passed": False,
+            "decision": "ERROR",
+            "reason_codes": [error.code],
+            "error": error.as_dict(),
+        },
+    )
+    return _EvaluationPacket(
+        started_at=started_at,
+        wall_milliseconds=elapsed,
+        records_evaluated=0,
+        peak_rss_bytes=0,
+        canonical_result=canonical_result,
     )
 
 
@@ -1120,6 +1178,69 @@ def _safe_output_relative(value: str, *, field: str) -> str:
     return value
 
 
+def _workspace_bytes(root: Path, *, stop_after: int) -> int:
+    """Count logical entry bytes without following links outside the workspace."""
+
+    total = 0
+    pending = [root]
+    try:
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    metadata = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+                        pending.append(Path(entry.path))
+                    else:
+                        total += max(0, metadata.st_size)
+                        if total > stop_after:
+                            return total
+    except OSError as error:
+        raise ValidationError(
+            "WORKSPACE_SCAN_FAILED", "Workspace usage could not be measured safely"
+        ) from error
+    return total
+
+
+def _workspace_entry_size(path: Path) -> int:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return 0
+    except OSError as error:
+        raise ValidationError(
+            "WORKSPACE_SCAN_FAILED", "Workspace usage could not be measured safely"
+        ) from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValidationError(
+            "WORKSPACE_ENTRY_INVALID", "Workspace destination is not a regular file"
+        )
+    return max(0, metadata.st_size)
+
+
+def _enforce_workspace_writes(
+    root: Path,
+    maximum: int,
+    writes: Sequence[tuple[Path, bytes]],
+) -> None:
+    """Reject writes whose atomic temporary or durable state exceeds the budget."""
+
+    steady = _workspace_bytes(root, stop_after=maximum)
+    peak = steady
+    for path, data in writes:
+        try:
+            path.relative_to(root)
+        except ValueError as error:
+            raise ValidationError(
+                "WORKSPACE_ENTRY_INVALID", "Workspace destination is outside the output root"
+            ) from error
+        previous = _workspace_entry_size(path)
+        peak = max(peak, steady + len(data))
+        steady = steady - previous + len(data)
+    if peak > maximum or steady > maximum:
+        raise ResourceLimitError("WORKSPACE_BYTES_EXCEEDED", "Workspace exceeded the byte limit")
+
+
 def _read_existing_result(root: Path, result_uri: str) -> tuple[Path, Mapping[str, object]] | None:
     try:
         stored = read_private_bytes(root, result_uri, max_bytes=1 << 20)
@@ -1142,7 +1263,15 @@ def _write_result(
     root: Path,
     result_uri: str,
     result: Mapping[str, object],
+    *,
+    max_workspace_bytes: int,
 ) -> WorkerOutcome:
+    result_bytes = canonical_json_bytes(result) + b"\n"
+    _enforce_workspace_writes(
+        root,
+        max_workspace_bytes,
+        ((root / result_uri, result_bytes),),
+    )
     try:
         path = write_canonical_json_private(root, result_uri, result)
         return WorkerOutcome(result=dict(result), path=path, replayed=False)
@@ -1180,6 +1309,7 @@ def run_isolated_job(
     job = load_job(job_path)
     job_snapshot = canonical_json_bytes(job.raw) + b"\n"
     preliminary_limits = reduce_limits(job.limits)
+    limits = preliminary_limits
     started_at = _utc_now()
     with _single_worker(private_root):
         prior_result = _read_existing_result(private_root, result_uri)
@@ -1218,6 +1348,7 @@ def run_isolated_job(
         receipt_log = ReceiptLog(private_root / receipt_dir)
         existing = receipt_log.find(job.idempotency_key, job.spec_sha256)
         if existing is not None:
+            limits = _recovery_limits(job, artifact_root)
             receipt = _receipt_ref(existing, private_root)
             stored = _as_mapping(
                 strict_json_loads(existing.data),
@@ -1235,7 +1366,12 @@ def run_isolated_job(
                 finished_at=stored_finished_at,
                 receipt=receipt,
             )
-            return _write_result(private_root, result_uri, result)
+            return _write_result(
+                private_root,
+                result_uri,
+                result,
+                max_workspace_bytes=limits.max_workspace_bytes,
+            )
 
         job.ensure_not_expired()
         try:
@@ -1247,13 +1383,22 @@ def run_isolated_job(
                 preliminary_limits,
                 admitted_monotonic,
             )
-            packet = _run_child(
-                job,
-                job_snapshot,
-                artifact_root,
-                limits,
-                admitted_monotonic,
-            )
+            try:
+                packet = _run_child(
+                    job,
+                    job_snapshot,
+                    artifact_root,
+                    limits,
+                    admitted_monotonic,
+                )
+            except AtlasResearchError as evaluation_error:
+                if evaluation_error.code in _NON_RECEIPT_EXECUTION_ERRORS:
+                    raise
+                packet = _terminal_error_packet(
+                    evaluation_error,
+                    started_at=started_at,
+                    admitted_monotonic=admitted_monotonic,
+                )
             job.ensure_not_expired()
             source_provenance = _source_provenance()
             previous_sha256 = receipt_log.head_sha256
@@ -1267,16 +1412,50 @@ def run_isolated_job(
                 created_at=created_at,
                 source_provenance=source_provenance,
             )
-            commit = receipt_log.commit(receipt_document, not_after=job.deadline)
-            receipt = _receipt_ref(commit, private_root)
-            result = _result_document(
-                job,
-                normalized_identity,
-                status="completed",
-                started_at=packet.started_at,
-                finished_at=created_at,
-                receipt=receipt,
+            prepared_result: dict[str, object] | None = None
+
+            def admit_receipt(commit: ReceiptCommit, head_data: bytes | None) -> None:
+                nonlocal prepared_result
+                receipt = _receipt_ref(commit, private_root)
+                prepared_result = _result_document(
+                    job,
+                    normalized_identity,
+                    status="completed",
+                    started_at=packet.started_at,
+                    finished_at=created_at,
+                    receipt=receipt,
+                )
+                writes: list[tuple[Path, bytes]] = []
+                if not commit.replayed:
+                    if head_data is None:  # pragma: no cover - ReceiptLog invariant
+                        raise ValidationError(
+                            "WORKSPACE_ENTRY_INVALID", "Receipt HEAD bytes are unavailable"
+                        )
+                    writes.extend(
+                        (
+                            (commit.path, commit.data),
+                            (receipt_log.root / "HEAD", head_data),
+                        )
+                    )
+                writes.append(
+                    (private_root / result_uri, canonical_json_bytes(prepared_result) + b"\n")
+                )
+                _enforce_workspace_writes(
+                    private_root,
+                    limits.max_workspace_bytes,
+                    writes,
+                )
+
+            receipt_log.commit(
+                receipt_document,
+                not_after=job.deadline,
+                before_write=admit_receipt,
             )
+            if prepared_result is None:  # pragma: no cover - ReceiptLog invariant
+                raise ValidationError(
+                    "WORKSPACE_ENTRY_INVALID", "Completed result was not prepared"
+                )
+            result = prepared_result
         except AtlasResearchError as error:
             if error.code == "RECEIPT_HEAD_WRITE_FAILED":
                 # A durable completed receipt exists. Do not publish a
@@ -1295,10 +1474,14 @@ def run_isolated_job(
                 started_at=started_at,
                 finished_at=finished_at,
                 error=error,
-                retryable=error.code
-                in {"WORKER_TIMEOUT", "WORKER_OUTPUT_EXCEEDED", "INTERNAL_ERROR"},
+                retryable=error.code in _RETRYABLE_EXECUTION_ERRORS,
             )
-        return _write_result(private_root, result_uri, result)
+        return _write_result(
+            private_root,
+            result_uri,
+            result,
+            max_workspace_bytes=limits.max_workspace_bytes,
+        )
 
 
 __all__ = [

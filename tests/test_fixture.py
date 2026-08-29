@@ -15,6 +15,18 @@ from atlas_research.receipts import ReceiptLog
 from atlas_research.worker import SourceProvenance, WorkerIdentity, evaluate_job, run_isolated_job
 
 
+def test_docker_build_context_is_default_deny() -> None:
+    root = Path(__file__).parents[1]
+    rules = (root / ".dockerignore").read_text(encoding="utf-8").splitlines()
+
+    assert rules == [
+        "**",
+        "!Dockerfile",
+        "!dist/",
+        "!dist/atlas_research-*.whl",
+    ]
+
+
 def test_committed_fixture_is_digest_pinned_and_runs_one_shot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

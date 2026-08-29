@@ -33,7 +33,7 @@ Scout/Engine pinned evidence
           v
 immutable dataset -> one-variable candidate -> bounded evaluation
                                                 |
-                                      KEEP or DISCARD receipt
+                                  KEEP / DISCARD / ERROR receipt
                                                 |
                                      explicit human review
                                                 |
@@ -98,6 +98,8 @@ and Docker commands. Public JSON Schemas live in [`schemas/v1`](schemas/v1).
   lifecycle commands, candidate code, or arbitrary binaries;
 - one subprocess runs at a time under wall-time, file-size, open-file, and
   platform-appropriate memory ceilings;
+- receipt and result commits are admitted only when their atomic temporary and
+  durable bytes fit the reduced workspace ceiling;
 - the container profile is designed for `--network none`; local Qwen runs as a
   separate loopback-only proposal step;
 - receipts are private, append-only, hash-chained, and idempotency-bound;

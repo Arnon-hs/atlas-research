@@ -35,6 +35,13 @@ def metric(
     return value
 
 
+def two_metric_specs() -> dict[str, dict[str, object]]:
+    return {
+        "mae": metric("lower", 100, 0),
+        "calibration_error": metric("lower", 1, 0, parameters={"bins": 10}),
+    }
+
+
 def test_recompute_canonical_result_normalizes_delta_and_gates() -> None:
     specs = {
         "mae": metric("lower", 3, 0.5),
@@ -79,14 +86,32 @@ def test_recompute_canonical_result_discards_on_any_failed_gate() -> None:
 
 def test_metric_map_has_fixed_directions_parameters_and_keys() -> None:
     with pytest.raises(ValidationError) as raised:
-        parse_metric_specs({"mae": metric("higher", 1, 0)})
+        parse_metric_specs(
+            {
+                "mae": metric("higher", 1, 0),
+                "calibration_error": metric("lower", 1, 0, parameters={"bins": 10}),
+            }
+        )
     assert raised.value.code == "METRIC_DIRECTION_MISMATCH"
     with pytest.raises(ValidationError) as raised:
-        parse_metric_specs({"mae": metric("lower", 1, 0, parameters={"threshold": 50})})
+        parse_metric_specs(
+            {
+                "mae": metric("lower", 1, 0, parameters={"threshold": 50}),
+                "calibration_error": metric("lower", 1, 0, parameters={"bins": 10}),
+            }
+        )
     assert raised.value.code == "METRIC_PARAMETER_MISMATCH"
     with pytest.raises(ValidationError) as raised:
-        recompute_canonical_result({"mae": 1}, {"mae": 1, "f1": 1}, {"mae": metric("lower", 1, 0)})
+        recompute_canonical_result(
+            {"mae": 1, "calibration_error": 0},
+            {"mae": 1, "f1": 1},
+            two_metric_specs(),
+        )
     assert raised.value.code == "METRIC_SET_MISMATCH"
+
+    with pytest.raises(ValidationError) as raised:
+        parse_metric_specs({"mae": metric("lower", 1, 0)})
+    assert raised.value.code == "INVALID_BENCHMARK"
 
 
 def test_evaluate_predictions_computes_every_declared_metric() -> None:
@@ -123,9 +148,15 @@ def records() -> list[dict[str, object]]:
 
 
 def test_payload_and_experiment_evaluation_are_research_only_and_deterministic() -> None:
-    specs = {"mae": metric("lower", 0, 1)}
+    specs = {
+        "mae": metric("lower", 0, 1),
+        "calibration_error": metric("lower", 0, 0, parameters={"bins": 10}),
+    }
     baseline = evaluate_payload(linear(weight=1), records(), specs)
-    assert baseline == {"mae": Decimal("20.000000000000")}
+    assert baseline == {
+        "mae": Decimal("20.000000000000"),
+        "calibration_error": Decimal("0.200000000000"),
+    }
     result = evaluate_experiment(linear(weight=1), linear(weight=2), records(), specs)
     assert result["decision"] == "KEEP"
     assert result["metrics"]["mae"]["candidate"] == "0"
@@ -136,5 +167,5 @@ def test_payload_evaluation_rejects_duplicate_records() -> None:
     duplicate = records()
     duplicate[1]["id"] = "b"
     with pytest.raises(ValidationError) as raised:
-        evaluate_payload(linear(weight=1), duplicate, {"mae": metric("lower", 100, 0)})
+        evaluate_payload(linear(weight=1), duplicate, two_metric_specs())
     assert raised.value.code == "DUPLICATE_RECORD_ID"

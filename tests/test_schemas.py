@@ -117,7 +117,12 @@ def valid_documents() -> dict[str, dict[str, Any]]:
                 "mae": {
                     "direction": "lower",
                     "gate": {"absolute_threshold": 10, "minimum_delta": 0},
-                }
+                },
+                "calibration_error": {
+                    "direction": "lower",
+                    "parameters": {"bins": 10},
+                    "gate": {"absolute_threshold": 1, "minimum_delta": 0},
+                },
             },
             "minimum_records": {"train": 1, "validation": 1, "test": 1},
             "limits": _limits(),
@@ -160,7 +165,13 @@ def valid_documents() -> dict[str, dict[str, Any]]:
                         "candidate": "1",
                         "candidate_minus_baseline": "-1",
                         "passed": True,
-                    }
+                    },
+                    "calibration_error": {
+                        "baseline": "0.2",
+                        "candidate": "0.1",
+                        "candidate_minus_baseline": "-0.1",
+                        "passed": True,
+                    },
                 },
                 "all_gates_passed": True,
                 "decision": "KEEP",
@@ -220,6 +231,35 @@ def test_valid_contract_document(schema_name: str) -> None:
     )
 
 
+def test_terminal_error_receipt_has_no_metric_values() -> None:
+    receipt = copy.deepcopy(valid_documents()["experiment-receipt.v1.schema.json"])
+    receipt["canonical_result"] = {
+        "metrics": {},
+        "all_gates_passed": False,
+        "decision": "ERROR",
+        "reason_codes": ["EVALUATION_INCOMPLETE"],
+        "error": {
+            "code": "EVALUATION_INCOMPLETE",
+            "message": "Evaluation did not complete",
+        },
+    }
+    validator = Draft202012Validator(
+        SCHEMAS["experiment-receipt.v1.schema.json"], registry=_registry()
+    )
+    validator.validate(receipt)
+
+    invalid = copy.deepcopy(receipt)
+    invalid["canonical_result"]["metrics"] = {  # type: ignore[index]
+        "mae": {
+            "baseline": "1",
+            "candidate": "1",
+            "candidate_minus_baseline": "0",
+            "passed": False,
+        }
+    }
+    _assert_invalid("experiment-receipt.v1.schema.json", invalid)
+
+
 def _assert_invalid(schema_name: str, document: dict[str, Any]) -> None:
     errors = list(
         Draft202012Validator(SCHEMAS[schema_name], registry=_registry()).iter_errors(document)
@@ -272,16 +312,23 @@ def test_benchmark_metric_parameter_schema_matches_runtime_allowlist(metric_name
             "parameters": {parameter_name: parameter_value},
             "gate": {"absolute_threshold": 0, "minimum_delta": 0},
         }
-        benchmark["metrics"] = {metric_name: definition}
+        companion_name = "mae" if metric_name != "mae" else "calibration_error"
+        companion: dict[str, object] = {
+            "direction": METRIC_DIRECTIONS[companion_name],
+            "gate": {"absolute_threshold": 0, "minimum_delta": 0},
+        }
+        if companion_name == "calibration_error":
+            companion["parameters"] = {"bins": 10}
+        benchmark["metrics"] = {metric_name: definition, companion_name: companion}
 
         if parameter_name in METRIC_PARAMETERS[metric_name]:
-            parse_metric_specs({metric_name: definition})
+            parse_metric_specs(benchmark["metrics"])
             Draft202012Validator(
                 SCHEMAS["benchmark-manifest.v1.schema.json"], registry=_registry()
             ).validate(benchmark)
         else:
             with pytest.raises(ValidationError, match="outside its allowlist"):
-                parse_metric_specs({metric_name: definition})
+                parse_metric_specs(benchmark["metrics"])
             _assert_invalid("benchmark-manifest.v1.schema.json", benchmark)
 
 

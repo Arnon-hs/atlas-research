@@ -150,7 +150,7 @@ def build_fixture(root: Path) -> None:
         "created_at": CREATED_AT,
         "status": "proposed",
         "parent_evaluation_payload": baseline_ref.to_mapping(),
-        "research_level": "LEVEL_1",
+        "research_level": "LEVEL_2",
         "hypothesis": "Increase one synthetic quality weight from 1 to 2.",
         "changed_variable": {"path": "weights.quality", "old_value": 1, "new_value": 2},
         "evaluation_payload": proposed_ref.to_mapping(),
@@ -179,7 +179,12 @@ def build_fixture(root: Path) -> None:
             "mae": {
                 "direction": "lower",
                 "gate": {"absolute_threshold": 0, "minimum_delta": 0},
-            }
+            },
+            "calibration_error": {
+                "direction": "lower",
+                "parameters": {"bins": 10},
+                "gate": {"absolute_threshold": 0, "minimum_delta": 0},
+            },
         },
         "minimum_records": {"train": 1, "validation": 1, "test": 1},
         "limits": _limits(),

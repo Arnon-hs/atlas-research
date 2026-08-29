@@ -20,7 +20,7 @@ This is a public-safe discovery snapshot, not a deployment claim.
 | --- | --- | --- |
 | Atlas Research | Public repository, no prior implementation | Build the artifact-first v0.1 here |
 | Atlas Engine | Public `v0.4.2`; subprocess JSON/JSONL contracts | Reuse the release; extend only for a demonstrated deterministic evidence gap |
-| Scout | Existing control plane `1.50.1`, scoring, queues, search evaluation, embeddings, leases | Reuse; do not duplicate active semantic-coverage or embedding retry/quota work |
+| Scout | Existing control plane `1.52.0`, scoring, queues, search evaluation, embeddings, leases | Reuse; do not duplicate active semantic-coverage or embedding retry/quota work |
 | AtlasRepo Schema | Bootstrap is being established in a separate task | Wait for its stable topology contract; provide requirements only |
 | jit-runner-kit | Public `v0.3.1` | Adapt lease/fencing ideas independently; do not copy its privileged JIT runner model |
 | open-source catalog | Public projection repository, not a runtime store | Only sanitized, approved public projections may be added later |
@@ -195,7 +195,10 @@ artifact store, and Research does not write to it directly.
 | 3 | Lightweight ranker/classifier | Separately approved model contract, stronger holdout and serving plan |
 | 4 | LoRA/Qwen adaptation | Explicit security, privacy, licensing, model-evaluation, rollback, and compute review |
 
-v0.1 evaluates Levels 1 and 2 only. Each benchmark declares minimum total and
+The v0.1 contract reserves Levels 1 and 2, while the bundled numeric linear
+evaluator implements Level 2 feature and score-weight experiments only. A
+separate reviewed prompt/rubric artifact and benchmark are required before
+claiming Level 1 runtime support. Each benchmark declares minimum total and
 per-split record counts; advancing maturity requires a reviewed ADR backed by
 coverage and benchmark reliability. Levels 3 and 4 are not implemented claims.
 

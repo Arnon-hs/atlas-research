@@ -63,9 +63,9 @@ a private output directory:
 ```bash
 job_path="examples/fixture-v1/job.json"
 artifact_root="examples/fixture-v1"
-output_root="/operator/controlled/atlas-research-output"
+output_root="$(mktemp -d /tmp/atlas-research-output.XXXXXX)"
 
-mkdir -m 700 "$output_root"
+chmod 700 "$output_root"
 uv run atlas-research worker run \
   --job "$job_path" \
   --artifact-root "$artifact_root" \
@@ -122,6 +122,10 @@ Build only from a clean checkout. The cleanliness check includes tracked and
 untracked files and runs before `uv build`; the image receives the exact
 40-character commit. Then run with no network, a read-only root filesystem,
 dropped capabilities, and a private writable output mount:
+
+The Docker build context is default-deny and contains only `Dockerfile` plus the
+single built wheel. Ignored `.env*`, source data, workspaces, and repository
+metadata are not sent to BuildKit.
 
 ```bash
 test -z "$(git status --porcelain=v1 --untracked-files=all)" || {

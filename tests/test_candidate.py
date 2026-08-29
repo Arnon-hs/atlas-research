@@ -22,8 +22,15 @@ def payload(*, bias: int | float = 10, quality: int | float = 2) -> dict[str, ob
     }
 
 
-def candidate(path: str, old: int | float, new: int | float) -> dict[str, object]:
+def candidate(
+    path: str,
+    old: int | float,
+    new: int | float,
+    *,
+    research_level: str = "LEVEL_2",
+) -> dict[str, object]:
     return {
+        "research_level": research_level,
         "changed_variable": {"path": path, "old_value": old, "new_value": new},
         "target_contract": {"id": "opaque:scout:provenance", "version": "999"},
     }
@@ -74,6 +81,16 @@ def test_candidate_target_contract_is_only_opaque_provenance() -> None:
     proposed = payload(bias=11)
     verified = verify_candidate_change(candidate("bias", 10, 11), parent, proposed)
     assert verified.path == "bias"
+
+
+def test_linear_weight_candidate_requires_level_2() -> None:
+    with pytest.raises(ValidationError) as raised:
+        verify_candidate_change(
+            candidate("weights.quality", 2, 3, research_level="LEVEL_1"),
+            payload(),
+            payload(quality=3),
+        )
+    assert raised.value.code == "RESEARCH_LEVEL_MISMATCH"
 
 
 def test_candidate_rejects_hidden_second_change_and_structure_drift() -> None:

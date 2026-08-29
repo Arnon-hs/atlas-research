@@ -21,9 +21,10 @@ database, Redis, or deployment path.
    not grant execution authority; an external operator capability must exist
    before the worker can admit the test split.
 3. Benchmark metadata is untrusted and declares resource ceilings. A sanitized
-   preflight subprocess resolves only the digest-pinned benchmark under the
-   preliminary job/operator/host ceilings. The parent validates its packet and
-   reduces the reported limits again before starting evaluation.
+   preflight subprocess resolves the digest-pinned benchmark, validates its job
+   bindings, and parses its metrics/minimum records under the preliminary
+   job/operator/host ceilings. The parent validates its packet and reduces the
+   reported limits again before starting evaluation.
 4. Artifact resolution uses directory file descriptors and rejects traversal,
    symlinks, hard links, archives, devices, FIFOs, digest drift, size drift, and
    role/schema/media mismatches.
@@ -36,7 +37,13 @@ database, Redis, or deployment path.
    metrics and gates. The parent watchdog enforces the reduced wall-time and
    output limit.
 9. The receipt is canonical, append-only, hash-chained, and bound to job
-   idempotency. The result references the exact committed receipt bytes.
+   idempotency. Before append, the worker accounts for receipt, mutable HEAD,
+   result, and their atomic temporary bytes against the reduced workspace
+   ceiling. The result references the exact committed receipt bytes.
+10. If a committed receipt survives but its result is missing, recovery resolves
+    and validates the same digest-pinned benchmark to restore its reduced
+    workspace ceiling. It rebuilds only the bound result and does not rerun the
+    experiment or require a still-open execution deadline.
 
 Deadline enforcement is repeated at the exact state transitions: initial parent
 admission; child preflight admission; before each child wait using the smaller
@@ -54,7 +61,9 @@ cover CPU time, output file size, open file descriptors, and core dumps. Linux
 additionally applies an address space ceiling. macOS virtual-address semantics
 make `RLIMIT_AS` unsafe for an already mapped interpreter, so host memory
 isolation there must come from the container or process supervisor. Concurrency
-is fixed to one per private output root.
+is fixed to one per private output root. Native runs also count logical bytes
+without following links and reject a receipt/result transaction before its
+first durable write when the workspace budget would be exceeded.
 
 The recommended hostile-input boundary is a non-root container with no network,
 no capabilities, a read-only root filesystem, a PID limit, explicit CPU/memory

@@ -22,8 +22,9 @@ different role is rejected.
 
 ## Benchmark
 
-Metric keys are structurally unique and their direction/range is fixed by the
-schema. Parameters are allowlisted by metric:
+Each benchmark declares at least two metric keys so a candidate cannot be
+accepted on one overall number. Keys are structurally unique and their
+direction/range is fixed by the schema. Parameters are allowlisted by metric:
 
 | Metric | Allowed parameters |
 | --- | --- |
@@ -50,7 +51,10 @@ second hidden change is rejected.
 
 The v0.1 synthetic linear evaluator format is research-only test/evaluation
 data. It is not a Scout `ScoringModelDefinition`, is not a production contract,
-and cannot be imported or activated. Unknown payload schemas fail closed.
+and cannot be imported or activated. Every `bias` or `weights.*` change is a
+Level 2 feature/score-weight experiment and must declare `LEVEL_2`; `LEVEL_1`
+prompt/rubric candidates are reserved until their own artifact and evaluator
+contract exists. Unknown payload schemas fail closed.
 
 ## Job and receipt
 
@@ -72,6 +76,11 @@ and cannot be imported or activated. Unknown payload schemas fail closed.
   it never trusts producer arithmetic.
 - `KEEP` requires every gate to pass; `DISCARD` requires at least one failed
   gate; `ERROR` is never marked as all-gates-passed.
+- A job that passes preflight but cannot complete deterministic evaluation
+  appends a bounded `ERROR` receipt whose sole reason code equals its error
+  code. Preflight rejection, timeout, output cancellation, expiry, internal
+  failure, and invalid worker protocol do not append a receipt; retryable
+  infrastructure failures remain eligible for a new attempt.
 - Result `job_id`, `attempt`, `idempotency_key`, and `job_spec_sha256` match the
   exact job. Receipt job identity/digest, evaluation split, and every input ref
   match that job; the result receipt ref matches the exact committed bytes.

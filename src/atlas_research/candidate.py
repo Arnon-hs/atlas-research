@@ -223,6 +223,11 @@ def verify_candidate_change(
         raise ValidationError(
             "UNKNOWN_EVALUATOR_SCHEMA", "candidate evaluator schema is not allowlisted"
         )
+    if candidate.get("research_level") != "LEVEL_2":
+        raise ValidationError(
+            "RESEARCH_LEVEL_MISMATCH",
+            "linear feature and score-weight changes require research level LEVEL_2",
+        )
     _target_contract_is_provenance(candidate)
     validate_linear_evaluator(parent_payload)
     validate_linear_evaluator(proposed_payload)

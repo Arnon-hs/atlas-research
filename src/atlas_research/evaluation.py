@@ -7,7 +7,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Literal, TypedDict, cast
+from typing import Literal, NotRequired, TypedDict, cast
 
 from .candidate import LinearEvaluator, score_linear_evaluator, validate_linear_evaluator
 from .canonical import decimal_string, quantize_decimal
@@ -25,7 +25,7 @@ from .metrics import (
 )
 
 MetricDirection = Literal["higher", "lower"]
-Decision = Literal["KEEP", "DISCARD"]
+Decision = Literal["KEEP", "DISCARD", "ERROR"]
 
 METRIC_DIRECTIONS: Mapping[str, MetricDirection] = {
     "mae": "lower",
@@ -67,11 +67,17 @@ class MetricResult(TypedDict):
     passed: bool
 
 
+class CanonicalError(TypedDict):
+    code: str
+    message: str
+
+
 class CanonicalResult(TypedDict):
     metrics: dict[str, MetricResult]
     all_gates_passed: bool
     decision: Decision
     reason_codes: list[str]
+    error: NotRequired[CanonicalError]
 
 
 def _decimal(value: object, *, field: str) -> Decimal:
@@ -105,8 +111,8 @@ def _gate_ranges(name: str) -> tuple[Decimal, Decimal, Decimal]:
 def parse_metric_specs(metric_specs: Mapping[str, object]) -> dict[str, MetricDefinition]:
     """Validate a benchmark metric map, including fixed directions/parameters."""
 
-    if not 1 <= len(metric_specs) <= len(METRIC_DIRECTIONS):
-        raise ValidationError("INVALID_BENCHMARK", "benchmark must define between 1 and 7 metrics")
+    if not 2 <= len(metric_specs) <= len(METRIC_DIRECTIONS):
+        raise ValidationError("INVALID_BENCHMARK", "benchmark must define between 2 and 7 metrics")
     unknown = set(metric_specs) - set(METRIC_DIRECTIONS)
     if unknown:
         raise ValidationError("UNKNOWN_METRIC", "benchmark contains a metric outside the allowlist")

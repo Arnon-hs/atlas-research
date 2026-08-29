@@ -53,7 +53,13 @@ def _receipt(*, receipt_id: str = "receipt-1") -> dict[str, object]:
                 "candidate": "0.72",
                 "candidate_minus_baseline": "0.02",
                 "passed": True,
-            }
+            },
+            "mae": {
+                "baseline": "0.3",
+                "candidate": "0.2",
+                "candidate_minus_baseline": "-0.1",
+                "passed": True,
+            },
         },
         "all_gates_passed": True,
         "decision": "KEEP",
