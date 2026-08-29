@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlasrepo:atlas-research:schema:v1:benchmark-manifest",
+  "title": "Atlas Research benchmark manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "benchmark_id",
+    "created_at",
+    "dataset_manifest",
+    "baseline_evaluation_payload",
+    "evaluation_split",
+    "metrics",
+    "minimum_records",
+    "limits"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "benchmark_id": { "$ref": "#/$defs/identifier" },
+    "created_at": { "$ref": "#/$defs/timestamp" },
+    "dataset_manifest": {
+      "allOf": [
+        { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+        { "properties": { "role": { "const": "dataset_manifest" } } }
+      ]
+    },
+    "baseline_evaluation_payload": {
+      "allOf": [
+        { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+        { "properties": { "role": { "const": "evaluation_payload" } } }
+      ]
+    },
+    "evaluation_split": { "enum": ["validation", "test"] },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 7,
+      "properties": {
+        "mae": { "$ref": "#/$defs/lower_100_metric" },
+        "spearman": { "$ref": "#/$defs/higher_signed_metric" },
+        "pairwise_accuracy": { "$ref": "#/$defs/higher_unit_metric" },
+        "ndcg_at_10": { "$ref": "#/$defs/higher_unit_metric" },
+        "ndcg_at_50": { "$ref": "#/$defs/higher_unit_metric" },
+        "f1": { "$ref": "#/$defs/higher_unit_metric" },
+        "calibration_error": { "$ref": "#/$defs/lower_unit_metric" }
+      }
+    },
+    "minimum_records": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["train", "validation", "test"],
+      "properties": {
+        "train": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "validation": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "test": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wall_seconds",
+        "max_records",
+        "max_input_bytes",
+        "max_output_bytes",
+        "max_workspace_bytes",
+        "max_peak_rss_bytes",
+        "max_open_files",
+        "max_json_depth",
+        "max_string_bytes"
+      ],
+      "properties": {
+        "wall_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "max_records": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "max_input_bytes": { "type": "integer", "minimum": 1, "maximum": 1073741824 },
+        "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "max_workspace_bytes": { "type": "integer", "minimum": 1, "maximum": 1073741824 },
+        "max_peak_rss_bytes": { "type": "integer", "minimum": 1048576, "maximum": 6442450944 },
+        "max_open_files": { "type": "integer", "minimum": 16, "maximum": 128 },
+        "max_json_depth": { "type": "integer", "minimum": 4, "maximum": 32 },
+        "max_string_bytes": { "type": "integer", "minimum": 1, "maximum": 65536 }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "threshold": { "type": "number", "minimum": 0, "maximum": 100 },
+        "bins": { "type": "integer", "minimum": 2, "maximum": 50 },
+        "max_pairs": { "type": "integer", "minimum": 1, "maximum": 50000 }
+      }
+    },
+    "lower_100_metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direction", "gate"],
+      "properties": {
+        "direction": { "const": "lower" },
+        "parameters": { "$ref": "#/$defs/parameters" },
+        "gate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["absolute_threshold", "minimum_delta"],
+          "properties": {
+            "absolute_threshold": { "type": "number", "minimum": 0, "maximum": 100 },
+            "minimum_delta": { "type": "number", "minimum": 0, "maximum": 100 }
+          }
+        }
+      }
+    },
+    "lower_unit_metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direction", "gate"],
+      "properties": {
+        "direction": { "const": "lower" },
+        "parameters": { "$ref": "#/$defs/parameters" },
+        "gate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["absolute_threshold", "minimum_delta"],
+          "properties": {
+            "absolute_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+            "minimum_delta": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        }
+      }
+    },
+    "higher_unit_metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direction", "gate"],
+      "properties": {
+        "direction": { "const": "higher" },
+        "parameters": { "$ref": "#/$defs/parameters" },
+        "gate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["absolute_threshold", "minimum_delta"],
+          "properties": {
+            "absolute_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+            "minimum_delta": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        }
+      }
+    },
+    "higher_signed_metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direction", "gate"],
+      "properties": {
+        "direction": { "const": "higher" },
+        "parameters": { "$ref": "#/$defs/parameters" },
+        "gate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["absolute_threshold", "minimum_delta"],
+          "properties": {
+            "absolute_threshold": { "type": "number", "minimum": -1, "maximum": 1 },
+            "minimum_delta": { "type": "number", "minimum": 0, "maximum": 2 }
+          }
+        }
+      }
+    }
+  }
+}

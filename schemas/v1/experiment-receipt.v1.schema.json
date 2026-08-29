@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlasrepo:atlas-research:schema:v1:experiment-receipt",
+  "title": "Atlas Research experiment receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "previous_receipt_sha256",
+    "created_at",
+    "experiment_id",
+    "job_id",
+    "attempt",
+    "idempotency_key",
+    "job_spec_sha256",
+    "canonical_result_sha256",
+    "dataset_manifest",
+    "benchmark_manifest",
+    "baseline_evaluation_payload",
+    "candidate",
+    "evaluation_split",
+    "canonical_result",
+    "resource_usage",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "receipt_id": { "$ref": "#/$defs/identifier" },
+    "previous_receipt_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "created_at": { "$ref": "#/$defs/timestamp" },
+    "experiment_id": { "$ref": "#/$defs/identifier" },
+    "job_id": { "$ref": "#/$defs/identifier" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 1000 },
+    "idempotency_key": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$" },
+    "job_spec_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "canonical_result_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "dataset_manifest": {
+      "allOf": [
+        { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+        { "properties": { "role": { "const": "dataset_manifest" } } }
+      ]
+    },
+    "benchmark_manifest": {
+      "allOf": [
+        { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+        { "properties": { "role": { "const": "benchmark_manifest" } } }
+      ]
+    },
+    "baseline_evaluation_payload": {
+      "allOf": [
+        { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+        { "properties": { "role": { "const": "evaluation_payload" } } }
+      ]
+    },
+    "candidate": {
+      "allOf": [
+        { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+        { "properties": { "role": { "const": "candidate" } } }
+      ]
+    },
+    "evaluation_split": { "enum": ["validation", "test"] },
+    "canonical_result": { "$ref": "#/$defs/canonical_result" },
+    "resource_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wall_milliseconds", "records_evaluated"],
+      "properties": {
+        "wall_milliseconds": { "type": "integer", "minimum": 0 },
+        "records_evaluated": { "type": "integer", "minimum": 0 },
+        "peak_rss_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["atlas_research_version", "git_commit", "python_version", "platform"],
+      "properties": {
+        "atlas_research_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "git_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "python_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "platform": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "worker_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "worker_session_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "decimal": {
+      "type": "string",
+      "pattern": "^(?:0|-?(?:[1-9][0-9]*(?:\\.[0-9]{0,11}[1-9])?|0\\.[0-9]{0,11}[1-9]))$",
+      "maxLength": 32
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline", "candidate", "candidate_minus_baseline", "passed"],
+      "properties": {
+        "baseline": { "$ref": "#/$defs/decimal" },
+        "candidate": { "$ref": "#/$defs/decimal" },
+        "candidate_minus_baseline": { "$ref": "#/$defs/decimal" },
+        "passed": { "type": "boolean" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "canonical_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metrics", "all_gates_passed", "decision", "reason_codes"],
+      "properties": {
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 0,
+          "maxProperties": 7,
+          "properties": {
+            "mae": { "$ref": "#/$defs/metric" },
+            "spearman": { "$ref": "#/$defs/metric" },
+            "pairwise_accuracy": { "$ref": "#/$defs/metric" },
+            "ndcg_at_10": { "$ref": "#/$defs/metric" },
+            "ndcg_at_50": { "$ref": "#/$defs/metric" },
+            "f1": { "$ref": "#/$defs/metric" },
+            "calibration_error": { "$ref": "#/$defs/metric" }
+          }
+        },
+        "all_gates_passed": { "type": "boolean" },
+        "decision": { "enum": ["KEEP", "DISCARD", "ERROR"] },
+        "reason_codes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" }
+        },
+        "error": { "$ref": "#/$defs/error" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "decision": { "const": "ERROR" } } },
+          "then": {
+            "required": ["error"],
+            "properties": { "all_gates_passed": { "const": false } }
+          },
+          "else": {
+            "not": { "required": ["error"] },
+            "properties": { "metrics": { "minProperties": 1 } }
+          }
+        },
+        {
+          "if": { "properties": { "decision": { "const": "KEEP" } } },
+          "then": {
+            "properties": {
+              "all_gates_passed": { "const": true },
+              "metrics": {
+                "properties": {
+                  "mae": { "properties": { "passed": { "const": true } } },
+                  "spearman": { "properties": { "passed": { "const": true } } },
+                  "pairwise_accuracy": { "properties": { "passed": { "const": true } } },
+                  "ndcg_at_10": { "properties": { "passed": { "const": true } } },
+                  "ndcg_at_50": { "properties": { "passed": { "const": true } } },
+                  "f1": { "properties": { "passed": { "const": true } } },
+                  "calibration_error": { "properties": { "passed": { "const": true } } }
+                }
+              }
+            }
+          },
+          "else": { "properties": { "all_gates_passed": { "const": false } } }
+        },
+        {
+          "if": { "properties": { "decision": { "const": "DISCARD" } } },
+          "then": {
+            "anyOf": [
+              { "properties": { "metrics": { "required": ["mae"], "properties": { "mae": { "properties": { "passed": { "const": false } } } } } } },
+              { "properties": { "metrics": { "required": ["spearman"], "properties": { "spearman": { "properties": { "passed": { "const": false } } } } } } },
+              { "properties": { "metrics": { "required": ["pairwise_accuracy"], "properties": { "pairwise_accuracy": { "properties": { "passed": { "const": false } } } } } } },
+              { "properties": { "metrics": { "required": ["ndcg_at_10"], "properties": { "ndcg_at_10": { "properties": { "passed": { "const": false } } } } } } },
+              { "properties": { "metrics": { "required": ["ndcg_at_50"], "properties": { "ndcg_at_50": { "properties": { "passed": { "const": false } } } } } } },
+              { "properties": { "metrics": { "required": ["f1"], "properties": { "f1": { "properties": { "passed": { "const": false } } } } } } },
+              { "properties": { "metrics": { "required": ["calibration_error"], "properties": { "calibration_error": { "properties": { "passed": { "const": false } } } } } } }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

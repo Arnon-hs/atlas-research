@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlasrepo:atlas-research:schema:v1:research-experiment-job",
+  "title": "Atlas Research offline experiment job v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task",
+    "job_id",
+    "attempt",
+    "idempotency_key",
+    "created_at",
+    "deadline",
+    "dataset_manifest",
+    "benchmark_manifest",
+    "baseline_evaluation_payload",
+    "candidate",
+    "evaluation_split",
+    "limits"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "task": { "const": "research.experiment" },
+    "job_id": { "$ref": "#/$defs/identifier" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 1000 },
+    "idempotency_key": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$" },
+    "created_at": { "$ref": "#/$defs/timestamp" },
+    "deadline": { "$ref": "#/$defs/timestamp" },
+    "dataset_manifest": {
+      "allOf": [
+        { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+        { "properties": { "role": { "const": "dataset_manifest" } } }
+      ]
+    },
+    "benchmark_manifest": {
+      "allOf": [
+        { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+        { "properties": { "role": { "const": "benchmark_manifest" } } }
+      ]
+    },
+    "baseline_evaluation_payload": {
+      "allOf": [
+        { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+        { "properties": { "role": { "const": "evaluation_payload" } } }
+      ]
+    },
+    "candidate": {
+      "allOf": [
+        { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+        { "properties": { "role": { "const": "candidate" } } }
+      ]
+    },
+    "evaluation_split": { "enum": ["validation", "test"] },
+    "review_authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reviewer", "approved_at", "reason"],
+      "properties": {
+        "reviewer": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "approved_at": { "$ref": "#/$defs/timestamp" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wall_seconds",
+        "max_records",
+        "max_input_bytes",
+        "max_output_bytes",
+        "max_workspace_bytes",
+        "max_peak_rss_bytes",
+        "max_open_files",
+        "max_json_depth",
+        "max_string_bytes"
+      ],
+      "properties": {
+        "wall_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "max_records": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "max_input_bytes": { "type": "integer", "minimum": 1, "maximum": 1073741824 },
+        "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "max_workspace_bytes": { "type": "integer", "minimum": 1, "maximum": 1073741824 },
+        "max_peak_rss_bytes": { "type": "integer", "minimum": 1048576, "maximum": 6442450944 },
+        "max_open_files": { "type": "integer", "minimum": 16, "maximum": 128 },
+        "max_json_depth": { "type": "integer", "minimum": 4, "maximum": 32 },
+        "max_string_bytes": { "type": "integer", "minimum": 1, "maximum": 65536 }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "evaluation_split": { "const": "test" } } },
+      "then": { "required": ["review_authorization"] },
+      "else": { "not": { "required": ["review_authorization"] } }
+    }
+  ]
+}

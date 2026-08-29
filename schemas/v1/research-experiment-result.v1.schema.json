@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlasrepo:atlas-research:schema:v1:research-experiment-result",
+  "title": "Atlas Research offline experiment result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task",
+    "job_id",
+    "attempt",
+    "idempotency_key",
+    "job_spec_sha256",
+    "status",
+    "started_at",
+    "finished_at",
+    "worker",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "task": { "const": "research.experiment" },
+    "job_id": { "$ref": "#/$defs/identifier" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 1000 },
+    "idempotency_key": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$" },
+    "job_spec_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "status": { "enum": ["completed", "rejected", "cancelled", "expired"] },
+    "started_at": { "$ref": "#/$defs/timestamp" },
+    "finished_at": { "$ref": "#/$defs/timestamp" },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker_id", "session_id", "version"],
+      "properties": {
+        "worker_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "receipt": {
+      "allOf": [
+        { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+        { "properties": { "role": { "const": "experiment_receipt" } } }
+      ]
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "allOf": [
+          { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+          { "not": { "properties": { "role": { "const": "experiment_receipt" } } } }
+        ]
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "retryable": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "completed" } } },
+      "then": {
+        "required": ["receipt"],
+        "not": { "required": ["error"] }
+      },
+      "else": {
+        "required": ["error"],
+        "not": { "required": ["receipt"] }
+      }
+    }
+  ]
+}

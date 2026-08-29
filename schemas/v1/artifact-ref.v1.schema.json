@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref",
+  "title": "Atlas Research artifact reference v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["uri", "role", "media_type", "sha256", "size_bytes", "producer"],
+  "properties": {
+    "uri": {
+      "type": "string",
+      "format": "uri-reference",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "role": {
+      "enum": [
+        "source_export",
+        "dataset_split",
+        "dataset_manifest",
+        "benchmark_manifest",
+        "evaluation_payload",
+        "candidate",
+        "experiment_receipt",
+        "worker_result",
+        "report",
+        "opaque"
+      ]
+    },
+    "media_type": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$",
+      "maxLength": 127
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 268435456
+    },
+    "logical_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$"
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      }
+    },
+    "external_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+){0,2}(?:[-+][0-9A-Za-z.-]+)?$",
+          "maxLength": 64
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "role": { "const": "source_export" } } },
+      "then": {
+        "required": ["external_schema"],
+        "properties": { "media_type": { "enum": ["application/json", "application/x-ndjson"] } }
+      }
+    },
+    {
+      "if": { "properties": { "role": { "const": "dataset_split" } } },
+      "then": {
+        "required": ["external_schema"],
+        "properties": {
+          "media_type": { "const": "application/x-ndjson" },
+          "producer": { "properties": { "name": { "const": "atlas-research" } } },
+          "external_schema": {
+            "properties": {
+              "id": { "const": "urn:atlasrepo:atlas-research:record:v1:scoring-example" },
+              "version": { "const": "1.0.0" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "role": { "const": "evaluation_payload" } } },
+      "then": {
+        "required": ["external_schema"],
+        "properties": {
+          "media_type": { "const": "application/json" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "role": {
+            "enum": ["dataset_manifest", "benchmark_manifest", "candidate", "experiment_receipt", "worker_result"]
+          }
+        }
+      },
+      "then": {
+        "required": ["external_schema"],
+        "properties": { "producer": { "properties": { "name": { "const": "atlas-research" } } } }
+      }
+    },
+    {
+      "if": { "properties": { "role": { "const": "dataset_manifest" } } },
+      "then": {
+        "properties": {
+          "media_type": { "const": "application/vnd.atlas-research.dataset-manifest+json" },
+          "external_schema": {
+            "properties": {
+              "id": { "const": "urn:atlasrepo:atlas-research:schema:v1:dataset-manifest" },
+              "version": { "const": "1.0.0" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "role": { "const": "benchmark_manifest" } } },
+      "then": {
+        "properties": {
+          "media_type": { "const": "application/vnd.atlas-research.benchmark-manifest+json" },
+          "external_schema": {
+            "properties": {
+              "id": { "const": "urn:atlasrepo:atlas-research:schema:v1:benchmark-manifest" },
+              "version": { "const": "1.0.0" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "role": { "const": "candidate" } } },
+      "then": {
+        "properties": {
+          "media_type": { "const": "application/vnd.atlas-research.candidate+json" },
+          "external_schema": {
+            "properties": {
+              "id": { "const": "urn:atlasrepo:atlas-research:schema:v1:candidate-artifact" },
+              "version": { "const": "1.0.0" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "role": { "const": "experiment_receipt" } } },
+      "then": {
+        "properties": {
+          "media_type": { "const": "application/vnd.atlas-research.experiment-receipt+json" },
+          "external_schema": {
+            "properties": {
+              "id": { "const": "urn:atlasrepo:atlas-research:schema:v1:experiment-receipt" },
+              "version": { "const": "1.0.0" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "role": { "const": "worker_result" } } },
+      "then": {
+        "properties": {
+          "media_type": { "const": "application/vnd.atlas-research.experiment-result+json" },
+          "external_schema": {
+            "properties": {
+              "id": { "const": "urn:atlasrepo:atlas-research:schema:v1:research-experiment-result" },
+              "version": { "const": "1.0.0" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "role": { "const": "report" } } },
+      "then": { "properties": { "media_type": { "const": "text/html" } } }
+    }
+  ]
+}

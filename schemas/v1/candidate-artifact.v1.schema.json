@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlasrepo:atlas-research:schema:v1:candidate-artifact",
+  "title": "Atlas Research candidate artifact v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "created_at",
+    "status",
+    "parent_evaluation_payload",
+    "research_level",
+    "hypothesis",
+    "changed_variable",
+    "evaluation_payload",
+    "target_contract",
+    "generator"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "candidate_id": { "$ref": "#/$defs/identifier" },
+    "created_at": { "$ref": "#/$defs/timestamp" },
+    "status": { "const": "proposed" },
+    "parent_evaluation_payload": {
+      "allOf": [
+        { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+        { "properties": { "role": { "const": "evaluation_payload" } } }
+      ]
+    },
+    "research_level": { "enum": ["LEVEL_1", "LEVEL_2"] },
+    "hypothesis": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "changed_variable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "old_value", "new_value"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$"
+        },
+        "old_value": { "$ref": "#/$defs/json_scalar" },
+        "new_value": { "$ref": "#/$defs/json_scalar" }
+      }
+    },
+    "evaluation_payload": {
+      "allOf": [
+        { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+        { "properties": { "role": { "const": "evaluation_payload" } } }
+      ]
+    },
+    "target_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["human", "qwen"] },
+        "model": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "model_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "prompt_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "qwen" } } },
+          "then": { "required": ["model", "model_sha256", "prompt_sha256"] },
+          "else": {
+            "not": {
+              "anyOf": [
+                { "required": ["model"] },
+                { "required": ["model_sha256"] },
+                { "required": ["prompt_sha256"] }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "json_scalar": {
+      "type": ["string", "number", "integer", "boolean", "null"]
+    }
+  }
+}

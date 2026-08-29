@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlasrepo:atlas-research:schema:v1:dataset-manifest",
+  "title": "Atlas Research dataset manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dataset_id",
+    "created_at",
+    "seed",
+    "split_method",
+    "split_ratios",
+    "source_artifacts",
+    "record_schema",
+    "splits"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "dataset_id": { "$ref": "#/$defs/identifier" },
+    "created_at": { "$ref": "#/$defs/timestamp" },
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "split_method": { "const": "sha256-id-v1" },
+    "split_ratios": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["train", "validation", "test"],
+      "properties": {
+        "train": { "const": 0.8 },
+        "validation": { "const": 0.1 },
+        "test": { "const": 0.1 }
+      }
+    },
+    "source_artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "allOf": [
+          { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+          { "properties": { "role": { "const": "source_export" } } }
+        ]
+      }
+    },
+    "record_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "const": "urn:atlasrepo:atlas-research:record:v1:scoring-example" },
+        "version": { "const": "1.0.0" }
+      }
+    },
+    "splits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["train", "validation", "test"],
+      "properties": {
+        "train": {
+          "allOf": [
+            { "$ref": "#/$defs/split" },
+            { "properties": { "sealed": { "const": false } } }
+          ]
+        },
+        "validation": {
+          "allOf": [
+            { "$ref": "#/$defs/split" },
+            { "properties": { "sealed": { "const": false } } }
+          ]
+        },
+        "test": {
+          "allOf": [
+            { "$ref": "#/$defs/split" },
+            { "properties": { "sealed": { "const": true } } }
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "split": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "record_count", "sealed"],
+      "properties": {
+        "artifact": {
+          "allOf": [
+            { "$ref": "urn:atlasrepo:atlas-research:schema:v1:artifact-ref" },
+            { "properties": { "role": { "const": "dataset_split" } } }
+          ]
+        },
+        "record_count": { "type": "integer", "minimum": 0, "maximum": 10000000 },
+        "sealed": { "type": "boolean" }
+      }
+    }
+  }
+}
