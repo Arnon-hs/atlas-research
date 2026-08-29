@@ -1,0 +1,28 @@
+name: Design proposal
+description: Propose a bounded contract or architecture change
+title: "design: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and evidence
+    validations:
+      required: true
+  - type: textarea
+    id: owner
+    attributes:
+      label: Canonical owner and affected contracts
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Smallest proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and non-goals
+    validations:
+      required: true

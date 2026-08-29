@@ -222,7 +222,9 @@ The v0.1 Research-owned contracts are `artifact-ref.v1`,
 - Splits derive deterministically from record ID, seed, and ratios.
 - The sealed test split is unavailable to hypothesis generation and routine
   validation experiments.
-- Test evaluation requires explicit review authorization and a distinct receipt.
+- Test data remains sealed: the v0.1 worker rejects test evaluation until a
+  separately protected operator capability, bound outside the untrusted job,
+  is implemented. Job review metadata is audit provenance only.
 - Metrics are deterministic code: MAE, Spearman, bounded pairwise accuracy,
   NDCG@10/50, threshold F1, and calibration error.
 - A benchmark declares direction, minimum delta, absolute threshold, minimum
