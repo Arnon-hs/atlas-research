@@ -27,9 +27,16 @@ documented where privacy permits, and free from retaliation.
 
 ## Reporting
 
-Do not place sensitive details in a public issue. Open a minimal issue titled
-`Code of Conduct contact request` and ask a maintainer to establish a private
-channel. A maintainer named in the report must not adjudicate it alone.
+This project is in a single-maintainer bootstrap phase. It has no dedicated
+private conduct address, alternate contact, or independent response team. Do
+not place sensitive details in a public issue. Open a minimal issue titled
+`Code of Conduct contact request` and ask the maintainer to establish a private
+channel; that issue is not itself a confidential report.
 
-The current maintainers interpret and enforce this policy. The project does not
+A maintainer named in a report must not adjudicate it alone. Because there is
+currently only one maintainer, the project cannot yet provide independent
+adjudication for a report involving that maintainer. This limitation remains
+explicit until a verified alternate contact or additional maintainer is added.
+
+The current maintainer interprets and enforces this policy. The project does not
 promise a response-time SLA during its pre-release phase.

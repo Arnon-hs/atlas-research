@@ -69,8 +69,10 @@ revive an expired lease.
 Reports contain aggregates and digests, never raw rows, prompts, credentials,
 signed URLs, or full model responses. HTML renders untrusted values as text with
 context-aware escaping, has no script/CSS/remote resource/untrusted link, and
-uses `default-src 'none'` CSP. A local server is loopback-only, GET/HEAD-only,
-with no directory listing or CORS and with `nosniff`.
+uses `default-src 'none'` plus a no-capability `sandbox` CSP. The serving
+validator rejects any second `http-equiv` directive, including meta refresh. A
+local server is loopback-only, GET/HEAD-only, with no directory listing or CORS
+and with `nosniff`.
 
 Browser tests inject tag, attribute, URL, SVG, bidi, and oversized Unicode
 payloads and assert no execution or external request.
