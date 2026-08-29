@@ -1,0 +1,125 @@
+name: Public quality gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Python ${{ matrix.python }} quality
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Type-check
+        run: uv run mypy src
+
+      - name: Test contracts and behavior
+        run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=80
+
+  package:
+    name: Reproducible package smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Build from the lockfile
+        run: |
+          uv sync --locked --all-groups
+          uv build
+
+      - name: Install and run the wheel
+        run: |
+          python -m venv .package-smoke
+          .package-smoke/bin/pip install --no-deps dist/*.whl
+          .package-smoke/bin/atlas-research --version
+
+      - name: Build and smoke-test the non-root offline image
+        run: |
+          docker build --build-arg VCS_REF="${GITHUB_SHA}" -t atlas-research:ci .
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --pids-limit 64 \
+            atlas-research:ci --version
+
+      - name: Run the digest-pinned fixture in the offline image
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --pids-limit 64 \
+            --memory 1536m --cpus 1 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+            --tmpfs /work/output:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \
+            --mount "type=bind,src=${GITHUB_WORKSPACE}/examples/fixture-v1,dst=/work/artifacts,readonly" \
+            atlas-research:ci worker run \
+            --job /work/artifacts/job.json \
+            --artifact-root /work/artifacts \
+            --output-root /work/output \
+            --result-uri result.json \
+            --worker-id github-actions --session-id fixture-v1 \
+          | python -c 'import json,pathlib,sys; payload=json.load(sys.stdin); manifest=json.loads(pathlib.Path("examples/fixture-v1/bundle-manifest.json").read_text()); result=payload["result"]; assert payload["replayed"] is False; assert result["status"]==manifest["expected"]["status"]; assert result["job_spec_sha256"]==manifest["job_spec_sha256"]; assert result["receipt"]["role"]=="experiment_receipt"'
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Audit locked environment
+        run: |
+          set -eu
+          uv sync --locked --all-groups
+          audit_file="$(mktemp "${RUNNER_TEMP:?}/atlas-research-audit.XXXXXX")"
+          trap 'rm -f "$audit_file"' EXIT HUP INT TERM
+          uv export --frozen --all-groups --no-emit-project \
+            --output-file "$audit_file" >/dev/null
+          uv run pip-audit --strict --disable-pip --require-hashes --no-deps \
+            -r "$audit_file"
