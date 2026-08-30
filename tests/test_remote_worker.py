@@ -1741,6 +1741,7 @@ def _open_descriptor_count() -> int | None:
 def test_interrupt_socket_duplication_supports_tls_wrappers() -> None:
     local, peer = socket.socketpair()
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
     wrapped = context.wrap_socket(
