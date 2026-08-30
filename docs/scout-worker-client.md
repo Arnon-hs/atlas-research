@@ -75,6 +75,11 @@ re-executing the experiment. Scout's terminal CAS decides whether that replay
 is the same accepted result. The exact run tree is retained for operational or
 ambiguous outcomes, but removed with symlink-safe bounded cleanup after an
 accepted completion, accepted failure, or Scout-confirmed cancellation.
+Cleanup opens each directory relative to an already pinned parent with
+`O_DIRECTORY|O_NOFOLLOW`, verifies the device/inode, and changes permissions
+only through that opened descriptor. It does not require Linux's unavailable
+`chmod(..., follow_symlinks=False)` capability and fails closed if a directory
+cannot be opened safely.
 After the heartbeat supervisor starts for a new claim, the worker removes every
 other direct run entry before staging; an empty claim response removes all stale
 entries. Therefore only the currently replayable claim tuple may survive an

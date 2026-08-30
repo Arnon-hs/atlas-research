@@ -732,7 +732,7 @@ def test_idle_prune_removes_tampered_entries_without_following_symlinks(tmp_path
     nested = stale / "nested"
     nested.mkdir(parents=True)
     (stale / "outside-link").symlink_to(outside, target_is_directory=True)
-    nested.chmod(0o000)
+    nested.chmod(0o555)
 
     outcome = worker.run_once()
 
@@ -1103,6 +1103,53 @@ def test_cleanup_is_bounded_and_does_not_follow_nested_symlinks(tmp_path: Path) 
     with pytest.raises(ValidationError, match="outside the active claim"):
         worker._cleanup_run_root(outside, claim)
     assert sentinel.is_file()
+
+
+def test_cleanup_does_not_require_chmod_nofollow_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = RemoteWorker(config)
+    job = _fixture_job()
+    claim = _claim((_artifact("job.json", job)[0],))
+    run_root = worker._run_root(claim)
+    nested = run_root / "artifacts/nested"
+    nested.mkdir()
+    nested.chmod(0o555)
+    (run_root / "artifacts").chmod(0o555)
+    linux_capabilities = set(os.supports_follow_symlinks)
+    linux_capabilities.discard(os.chmod)
+    monkeypatch.setattr(os, "supports_follow_symlinks", linux_capabilities)
+
+    worker._cleanup_run_root(run_root, claim)
+
+    assert not run_root.parent.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can open mode-000 directories")
+def test_prune_fails_closed_for_unopenable_nested_directory(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    fake = FakeClient(None, {})
+    worker = RemoteWorker(config, cast(ScoutWorkerClient, fake))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_text("preserve", encoding="utf-8")
+    stale = worker._runs_root / "atlas-research-fixture-v1-job-1-6-0"
+    nested = stale / "nested"
+    nested.mkdir(parents=True)
+    (nested / "outside-link").symlink_to(outside, target_is_directory=True)
+    nested.chmod(0o000)
+
+    try:
+        with pytest.raises(RemoteWorkerError) as captured:
+            worker.run_once()
+        assert captured.value.code == "WORKER_RUN_PRUNE_FAILED"
+        assert nested.is_dir()
+        assert sentinel.read_text(encoding="utf-8") == "preserve"
+        assert fake.failed == []
+    finally:
+        nested.chmod(0o700)
 
 
 @pytest.mark.parametrize("terminal", ["complete", "fail"])

@@ -1078,16 +1078,11 @@ class RemoteWorker:
             raise ValidationError(
                 "WORKER_CLEANUP_INVALID", "Worker cleanup is unsafe on this platform"
             )
-        if os.chmod not in os.supports_dir_fd or os.chmod not in os.supports_follow_symlinks:
-            raise ValidationError(
-                "WORKER_CLEANUP_INVALID", "Worker cleanup is unsafe on this platform"
-            )
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_DIRECTORY | os.O_NOFOLLOW
         parent_metadata = os.fstat(parent_fd)
         before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if not stat.S_ISDIR(before.st_mode) or before.st_dev != parent_metadata.st_dev:
             raise ValidationError("WORKER_CLEANUP_INVALID", "Worker run directory is unsafe")
-        os.chmod(name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
         directory_fd = os.open(name, flags, dir_fd=parent_fd)
         try:
             metadata = os.fstat(directory_fd)
