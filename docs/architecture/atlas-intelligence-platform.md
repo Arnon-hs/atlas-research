@@ -314,12 +314,13 @@ allowed. The only v0.1 network exception is fixed loopback Ollama. See the
 
 ## Scout-owned dual-workload worker
 
-The research-only outbound client is implemented as an unreleased candidate;
-remote execution stays disabled until Scout exposes reviewed authenticated
-claim, heartbeat, cancellation, and terminal-result endpoints. The envelope binds job digest,
-worker/session, attempt, fence, lease deadline, heartbeat sequence, cancellation
-generation, and result digest. Expired leases cannot revive; stale attempts
-cannot commit.
+The research-only outbound client implements the reviewed Scout-owned claim,
+heartbeat, cancellation, telemetry, and terminal-result protocol. It remains
+inert without explicit operator configuration, enrollment, and Scout's
+disabled-by-default feature gate. The envelope binds job digest,
+worker/session, attempt, fence, lease deadline, heartbeat sequence,
+cancellation generation, and result digest. Expired leases cannot revive;
+stale attempts cannot commit.
 
 | Priority | Work |
 | --- | --- |
