@@ -1,0 +1,1480 @@
+name: Immutable tagged release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, attest, and publish immutable release
+    if: github.repository == 'Arnon-hs/atlas-research'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write # Create the draft release, upload assets, and publish it.
+      packages: write # Push the versioned image and its registry attestation.
+      id-token: write # Mint the short-lived Sigstore identity for attestations.
+      attestations: write # Store GitHub provenance and SBOM attestations.
+      artifact-metadata: write # Record the GHCR image in GitHub's artifact index.
+
+    steps:
+      - name: Check out the exact tagged revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11.15"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.7"
+          enable-cache: false
+
+      - name: Validate immutable release identity
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ADMIN_PREFLIGHT_SHA: ${{ vars.RELEASE_ADMIN_PREFLIGHT_SHA }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "release tags must use exact vMAJOR.MINOR.PATCH syntax" >&2
+            exit 64
+          fi
+
+          version="${GITHUB_REF_NAME#v}"
+          release_notes=".github/release-notes/${GITHUB_REF_NAME}.md"
+          test -f "$release_notes"
+          project_version="$(python - <<'PY'
+          import pathlib
+          import tomllib
+
+          payload = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(payload["project"]["version"])
+          PY
+          )"
+          project_name="$(python - <<'PY'
+          import pathlib
+          import tomllib
+
+          payload = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(payload["project"]["name"])
+          PY
+          )"
+
+          test "$project_version" = "$version"
+          test "$project_name" = "atlasrepo-research"
+          test "$(git rev-parse --verify 'HEAD^{commit}')" = "${GITHUB_SHA}"
+          test "$(git rev-parse --verify "${GITHUB_REF_NAME}^{commit}")" = "${GITHUB_SHA}"
+
+          remote_tag_sha="$(
+            git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" \
+              "refs/tags/${GITHUB_REF_NAME}^{}" | awk 'NR == 1 { print $1 }'
+          )"
+          if test -z "$remote_tag_sha"; then
+            remote_tag_sha="$(
+              git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" \
+                "refs/tags/${GITHUB_REF_NAME}" | awk 'NR == 1 { print $1 }'
+            )"
+          fi
+          test "$remote_tag_sha" = "${GITHUB_SHA}"
+
+          release_pages="$(mktemp "${RUNNER_TEMP:?}/atlas-release-pages.XXXXXX")"
+          release_resolution="$(mktemp "${RUNNER_TEMP:?}/atlas-release-resolution.XXXXXX")"
+          trap 'rm -f "$release_pages" "$release_resolution"' EXIT HUP INT TERM
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$release_pages"
+          python - "$release_pages" "$GITHUB_REF_NAME" "$release_notes" \
+            > "$release_resolution" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          def resolve(pages: object, tag: str, expected_body: str) -> tuple[str, int | None]:
+              if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+                  raise ValueError("release pagination response is not a list of pages")
+              if any(not isinstance(release, dict) for page in pages for release in page):
+                  raise ValueError("release pagination response contains an invalid release")
+              matches = [
+                  release
+                  for page in pages
+                  for release in page
+                  if release.get("tag_name") == tag
+              ]
+              if len(matches) > 1:
+                  raise ValueError(f"multiple GitHub releases carry tag {tag!r}")
+              if not matches:
+                  return "absent", None
+
+              release = matches[0]
+              release_id = release.get("id")
+              if not isinstance(release_id, int) or isinstance(release_id, bool) or release_id <= 0:
+                  raise ValueError("existing release has an invalid release id")
+              common = {
+                  "tag_name": tag,
+                  "target_commitish": "main",
+                  "name": f"Atlas Research {tag}",
+                  "prerelease": False,
+                  "body": expected_body,
+              }
+              draft = {
+                  **common,
+                  "draft": True,
+                  "immutable": False,
+                  "published_at": None,
+              }
+              if {key: release.get(key) for key in draft} == draft:
+                  return "draft", release_id
+
+              published = {
+                  **common,
+                  "draft": False,
+                  "immutable": True,
+              }
+              actual = {key: release.get(key) for key in published}
+              published_at = release.get("published_at")
+              if actual != published or not isinstance(published_at, str) or not published_at:
+                  raise ValueError(
+                      "existing release is neither the exact draft nor exact immutable publication: "
+                      f"{actual!r}, published_at={published_at!r}"
+                  )
+              return "published_exact", release_id
+
+
+          fixture_tag = "v9.8.7"
+          fixture_body = "fixture release notes\n"
+          fixture_common = {
+              "id": 987,
+              "tag_name": fixture_tag,
+              "target_commitish": "main",
+              "name": f"Atlas Research {fixture_tag}",
+              "prerelease": False,
+              "body": fixture_body,
+          }
+          fixtures = (
+              ([], ("absent", None)),
+              (
+                  [[{**fixture_common, "draft": True, "immutable": False, "published_at": None}]],
+                  ("draft", 987),
+              ),
+              (
+                  [[{**fixture_common, "draft": False, "immutable": True, "published_at": "2026-01-01T00:00:00Z"}]],
+                  ("published_exact", 987),
+              ),
+          )
+          for fixture_pages, expected in fixtures:
+              actual = resolve(fixture_pages, fixture_tag, fixture_body)
+              if actual != expected:
+                  raise SystemExit(f"release resolver fixture failed: {actual!r} != {expected!r}")
+          duplicate = {**fixture_common, "draft": True, "immutable": False, "published_at": None}
+          try:
+              resolve([[duplicate], [duplicate]], fixture_tag, fixture_body)
+          except ValueError as error:
+              if "multiple GitHub releases" not in str(error):
+                  raise
+          else:
+              raise SystemExit("release resolver accepted duplicate exact-tag releases")
+          inexact = {
+              **fixture_common,
+              "target_commitish": "not-main",
+              "draft": True,
+              "immutable": False,
+              "published_at": None,
+          }
+          try:
+              resolve([[inexact]], fixture_tag, fixture_body)
+          except ValueError as error:
+              if "neither the exact draft nor exact immutable publication" not in str(error):
+                  raise
+          else:
+              raise SystemExit("release resolver accepted inexact release metadata")
+
+          pages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          try:
+              state, release_id = resolve(
+                  pages,
+                  sys.argv[2],
+                  pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"),
+              )
+          except ValueError as error:
+              raise SystemExit(str(error)) from None
+          print(state)
+          print("" if release_id is None else release_id)
+          PY
+          test "$(awk 'END { print NR }' "$release_resolution")" -eq 2
+          release_state="$(sed -n '1p' "$release_resolution")"
+          release_id="$(sed -n '2p' "$release_resolution")"
+
+          if test "$release_state" != published_exact; then
+            if test "$RELEASE_ADMIN_PREFLIGHT_SHA" != "$GITHUB_SHA"; then
+              echo "the admin immutable-release preflight is not bound to this commit" >&2
+              exit 69
+            fi
+            remote_main_sha="$(
+              git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" \
+                "refs/heads/main" | awk 'NR == 1 { print $1 }'
+            )"
+            test "$remote_main_sha" = "${GITHUB_SHA}"
+          fi
+
+          repository_lower="${GITHUB_REPOSITORY,,}"
+          image_name="ghcr.io/${repository_lower}"
+          image_ref="${image_name}:${GITHUB_REF_NAME}"
+          staging_ref="${image_name}:sha-${GITHUB_SHA}"
+
+          {
+            printf 'version=%s\n' "$version"
+            printf 'image_name=%s\n' "$image_name"
+            printf 'image_ref=%s\n' "$image_ref"
+            printf 'staging_ref=%s\n' "$staging_ref"
+            printf 'release_notes=%s\n' "$release_notes"
+            printf 'release_state=%s\n' "$release_state"
+            printf 'release_id=%s\n' "$release_id"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve existing versioned image state
+        id: image_state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_name="${GITHUB_REPOSITORY#*/}"
+          versions_json="$(mktemp "${RUNNER_TEMP:?}/atlas-package-versions.XXXXXX")"
+          trap 'rm -f "$versions_json"' EXIT HUP INT TERM
+          gh api --paginate --slurp \
+            "users/${GITHUB_REPOSITORY_OWNER}/packages/container/${package_name}/versions?per_page=100" \
+            > "$versions_json"
+          existing_digest="$(python - "$versions_json" "$GITHUB_REF_NAME" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          pages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          tag = sys.argv[2]
+          matches = [
+              version
+              for page in pages
+              for version in page
+              if tag in version.get("metadata", {}).get("container", {}).get("tags", [])
+          ]
+          if len(matches) > 1:
+              raise SystemExit(f"multiple GHCR versions carry tag {tag!r}")
+          if matches:
+              digest = matches[0].get("name")
+              if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                  raise SystemExit("existing GHCR version has an invalid manifest digest")
+              print(digest)
+          PY
+          )"
+
+          if test -n "$existing_digest"; then
+            printf 'exists=true\n' >> "$GITHUB_OUTPUT"
+            printf 'digest=%s\n' "$existing_digest" >> "$GITHUB_OUTPUT"
+          else
+            printf 'exists=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Enforce resumable publication state
+        env:
+          IMAGE_EXISTS: ${{ steps.image_state.outputs.exists }}
+          RELEASE_STATE: ${{ steps.identity.outputs.release_state }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$RELEASE_STATE" in
+            absent|draft) ;;
+            published_exact)
+              test "$IMAGE_EXISTS" = true || {
+                echo "an immutable release requires its exact versioned image" >&2
+                exit 66
+              }
+              ;;
+            *) echo "invalid release state" >&2; exit 68 ;;
+          esac
+
+      - name: Prepare release asset directory
+        run: install -d -m 0755 dist
+
+      - name: Generate source SPDX SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/atlasrepo-research-${{ steps.identity.outputs.version }}-source.spdx.json
+          syft-version: v1.51.1
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Normalize source SBOM identity reproducibly
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sbom="dist/atlasrepo-research-${VERSION}-source.spdx.json"
+          source_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          python - "$sbom" "$GITHUB_SHA" "$source_epoch" <<'PY'
+          import datetime
+          import json
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          revision = sys.argv[2]
+          source_epoch = int(sys.argv[3])
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          if payload.get("spdxVersion") != "SPDX-2.3":
+              raise SystemExit("source SBOM is not SPDX 2.3")
+          creation = payload.get("creationInfo")
+          if not isinstance(creation, dict):
+              raise SystemExit("source SBOM has no creationInfo object")
+          created = datetime.datetime.fromtimestamp(
+              source_epoch, tz=datetime.timezone.utc
+          ).strftime("%Y-%m-%dT%H:%M:%SZ")
+          creation["created"] = created
+          payload["documentNamespace"] = (
+              "https://github.com/Arnon-hs/atlas-research/sbom/source/" + revision
+          )
+          normalized = json.dumps(
+              payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+          ) + "\n"
+          path.write_text(normalized, encoding="utf-8")
+          PY
+
+      - name: Install locked build and test dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Reproduce wheel and source distribution bytes
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          export SOURCE_DATE_EPOCH
+          first_build="$(mktemp -d "${RUNNER_TEMP:?}/atlas-release-one.XXXXXX")"
+          second_build="$(mktemp -d "${RUNNER_TEMP:?}/atlas-release-two.XXXXXX")"
+          trap 'rm -rf "$first_build" "$second_build"' EXIT HUP INT TERM
+
+          uv build --no-create-gitignore --out-dir "$first_build"
+          uv build --no-create-gitignore --out-dir "$second_build"
+
+          wheel="atlasrepo_research-${VERSION}-py3-none-any.whl"
+          sdist="atlasrepo_research-${VERSION}.tar.gz"
+          test -f "$first_build/$wheel"
+          test -f "$first_build/$sdist"
+          test "$(find "$first_build" -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 2
+          cmp "$first_build/$wheel" "$second_build/$wheel"
+          cmp "$first_build/$sdist" "$second_build/$sdist"
+          install -m 0644 "$first_build/$wheel" "dist/$wheel"
+          install -m 0644 "$first_build/$sdist" "dist/$sdist"
+
+      - name: Smoke-test the wheel
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          smoke_venv="$(mktemp -d "${RUNNER_TEMP:?}/atlas-release-venv.XXXXXX")"
+          trap 'rm -rf "$smoke_venv"' EXIT HUP INT TERM
+          python -m venv "$smoke_venv"
+          "$smoke_venv/bin/pip" install --no-deps \
+            "dist/atlasrepo_research-${VERSION}-py3-none-any.whl"
+          "$smoke_venv/bin/atlas-research" --version
+
+      - name: Smoke-test a newly built offline image
+        if: steps.image_state.outputs.exists != 'true' && steps.identity.outputs.release_state != 'published_exact'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker build --pull --no-cache --network none \
+            --build-arg VCS_REF="${GITHUB_SHA}" \
+            --tag atlas-research:release-smoke .
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --pids-limit 64 \
+            atlas-research:release-smoke --version
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          image: docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+          cache-image: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          version: v0.36.1
+          driver-opts: image=docker.io/moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+          cache-binary: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Verify prior GitHub attestation for an existing version tag
+        if: steps.image_state.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ steps.image_state.outputs.digest }}
+          IMAGE_NAME: ${{ steps.identity.outputs.image_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          registry_json="$(mktemp "${RUNNER_TEMP:?}/atlas-registry-attestation.XXXXXX")"
+          github_json="$(mktemp "${RUNNER_TEMP:?}/atlas-github-attestation.XXXXXX")"
+          trap 'rm -f "$registry_json" "$github_json"' EXIT HUP INT TERM
+          verify_attestation() {
+            local output="$1"
+            shift
+            gh attestation verify "oci://${IMAGE_NAME}@${IMAGE_DIGEST}" \
+              "$@" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+              --signer-digest "$GITHUB_SHA" \
+              --source-digest "$GITHUB_SHA" \
+              --source-ref "$GITHUB_REF" \
+              --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --deny-self-hosted-runners \
+              --predicate-type "https://slsa.dev/provenance/v1" \
+              --format json > "$output"
+          }
+          verify_attestation "$registry_json" --bundle-from-oci
+          verify_attestation "$github_json" --limit 1000
+          python - "$registry_json" "$github_json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          for path_string in sys.argv[1:]:
+              results = json.loads(pathlib.Path(path_string).read_text(encoding="utf-8"))
+              if not isinstance(results, list) or not results:
+                  raise SystemExit("no exact trusted image attestation was verified")
+          PY
+
+      - name: Build and push the commit-staged multi-architecture image
+        id: image
+        if: steps.image_state.outputs.exists != 'true' && steps.identity.outputs.release_state != 'published_exact'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: VCS_REF=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.identity.outputs.version }}
+            org.opencontainers.image.licenses=MIT
+          tags: ${{ steps.identity.outputs.staging_ref }}
+          pull: true
+          no-cache: true
+          network: none
+          push: true
+          provenance: mode=max
+          sbom: generator=docker.io/docker/buildkit-syft-scanner:stable-1@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9
+
+      - name: Resolve and verify the exact release image
+        id: image_digest
+        env:
+          BUILT_DIGEST: ${{ steps.image.outputs.digest }}
+          EXISTING_DIGEST: ${{ steps.image_state.outputs.digest }}
+          IMAGE_NAME: ${{ steps.identity.outputs.image_name }}
+          IMAGE_REF: ${{ steps.identity.outputs.image_ref }}
+          STAGING_REF: ${{ steps.identity.outputs.staging_ref }}
+          VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if test -n "$BUILT_DIGEST" && test -n "$EXISTING_DIGEST"; then
+            echo "both built and existing image digests are set" >&2
+            exit 66
+          fi
+          IMAGE_DIGEST="${BUILT_DIGEST:-$EXISTING_DIGEST}"
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "release image digest is missing or invalid" >&2
+            exit 66
+          fi
+          if test -n "$BUILT_DIGEST"; then
+            INSPECT_REF="$STAGING_REF"
+          else
+            INSPECT_REF="$IMAGE_REF"
+          fi
+
+          manifest_file="$(mktemp "${RUNNER_TEMP:?}/atlas-image-index.XXXXXX")"
+          descriptors_file="$(mktemp "${RUNNER_TEMP:?}/atlas-image-platforms.XXXXXX")"
+          image_config_file="$(mktemp "${RUNNER_TEMP:?}/atlas-image-config.XXXXXX")"
+          trap 'rm -f "$manifest_file" "$descriptors_file" "$image_config_file"' \
+            EXIT HUP INT TERM
+          docker buildx imagetools inspect \
+            "$INSPECT_REF" --format '{{json .Manifest}}' > "$manifest_file"
+          python - "$manifest_file" "$IMAGE_DIGEST" > "$descriptors_file" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          expected_digest = sys.argv[2]
+          if payload.get("digest") != expected_digest:
+              raise SystemExit("GHCR tag does not resolve to the accepted manifest digest")
+          manifests = payload.get("manifests")
+          if not isinstance(manifests, list):
+              raise SystemExit("release image is not a multi-platform index")
+          required = {("linux", "amd64"), ("linux", "arm64")}
+          runtime = []
+          attestations = []
+          for entry in manifests:
+              platform = entry.get("platform", {})
+              identity = (platform.get("os"), platform.get("architecture"))
+              digest = entry.get("digest")
+              if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                  raise SystemExit("image index contains an invalid descriptor digest")
+              if identity in required:
+                  runtime.append((identity[0], identity[1], digest))
+                  continue
+              annotations = entry.get("annotations", {})
+              if (
+                  identity == ("unknown", "unknown")
+                  and annotations.get("vnd.docker.reference.type") == "attestation-manifest"
+              ):
+                  attestations.append(annotations.get("vnd.docker.reference.digest"))
+                  continue
+              raise SystemExit(f"unexpected image index descriptor for {identity!r}")
+          if len(runtime) != 2 or {(os_name, arch) for os_name, arch, _ in runtime} != required:
+              raise SystemExit("release image platforms are not exactly linux/amd64 and linux/arm64")
+          runtime_digests = {digest for _, _, digest in runtime}
+          if len(attestations) != 2 or set(attestations) != runtime_digests:
+              raise SystemExit("each release platform must have one BuildKit attestation manifest")
+          for os_name, arch, digest in sorted(runtime):
+              print(os_name, arch, digest, sep="\t")
+          PY
+
+          while IFS=$'\t' read -r os_name architecture platform_digest; do
+            docker buildx imagetools inspect \
+              "${IMAGE_NAME}@${platform_digest}" --format '{{json .Image}}' \
+              > "$image_config_file"
+            python - "$image_config_file" "$os_name" "$architecture" \
+              "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$VERSION" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          image = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          os_name, architecture, revision, repository, version = sys.argv[2:]
+          if (image.get("os"), image.get("architecture")) != (os_name, architecture):
+              raise SystemExit("platform image config identity does not match its descriptor")
+          config = image.get("config")
+          if not isinstance(config, dict):
+              raise SystemExit("platform image has no config object")
+          labels = config.get("Labels", config.get("labels"))
+          expected = {
+              "org.opencontainers.image.source": f"https://github.com/{repository}",
+              "org.opencontainers.image.revision": revision,
+              "org.opencontainers.image.version": version,
+              "org.opencontainers.image.licenses": "MIT",
+          }
+          if not isinstance(labels, dict) or any(labels.get(key) != value for key, value in expected.items()):
+              raise SystemExit("platform image labels do not match the tagged GitHub revision")
+          PY
+            platform="${os_name}/${architecture}"
+            provenance="$(docker run --rm --platform "$platform" --network none --read-only \
+              --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 \
+              --entrypoint cat "${IMAGE_NAME}@${platform_digest}" \
+              /usr/local/share/atlas-research/source-provenance)"
+            test "$(printf '%s\n' "$provenance" | sed -n '1p')" = "$GITHUB_SHA"
+            [[ "$(printf '%s\n' "$provenance" | sed -n '2p')" =~ ^[0-9a-f]{64}$ ]]
+            docker run --rm --platform "$platform" --network none --read-only \
+              --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 \
+              "${IMAGE_NAME}@${platform_digest}" --version
+          done < "$descriptors_file"
+
+          printf 'digest=%s\n' "$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the GHCR image
+        if: steps.image_state.outputs.exists != 'true' && steps.identity.outputs.release_state != 'published_exact'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.identity.outputs.image_name }}
+          subject-digest: ${{ steps.image_digest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify the newly created exact GitHub image attestation
+        if: steps.image_state.outputs.exists != 'true' && steps.identity.outputs.release_state != 'published_exact'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ steps.image_digest.outputs.digest }}
+          IMAGE_NAME: ${{ steps.identity.outputs.image_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          registry_json="$(mktemp "${RUNNER_TEMP:?}/atlas-registry-attestation.XXXXXX")"
+          github_json="$(mktemp "${RUNNER_TEMP:?}/atlas-github-attestation.XXXXXX")"
+          trap 'rm -f "$registry_json" "$github_json"' EXIT HUP INT TERM
+          verify_attestation() {
+            local output="$1"
+            shift
+            gh attestation verify "oci://${IMAGE_NAME}@${IMAGE_DIGEST}" \
+              "$@" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+              --signer-digest "$GITHUB_SHA" \
+              --source-digest "$GITHUB_SHA" \
+              --source-ref "$GITHUB_REF" \
+              --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --deny-self-hosted-runners \
+              --predicate-type "https://slsa.dev/provenance/v1" \
+              --format json > "$output"
+          }
+          attestation_verified=false
+          for attempt in $(seq 1 10); do
+            if verify_attestation "$registry_json" --bundle-from-oci \
+              && verify_attestation "$github_json" --limit 1000
+            then
+              attestation_verified=true
+              break
+            fi
+            test "$attempt" -lt 10 || exit 67
+            sleep 2
+          done
+          test "$attestation_verified" = true
+          python - "$registry_json" "$github_json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          for path_string in sys.argv[1:]:
+              results = json.loads(pathlib.Path(path_string).read_text(encoding="utf-8"))
+              if not isinstance(results, list) or not results:
+                  raise SystemExit("the new image attestation did not verify exactly")
+          PY
+
+      - name: Promote the attested digest to the version tag
+        if: steps.image_state.outputs.exists != 'true' && steps.identity.outputs.release_state != 'published_exact'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ steps.image_digest.outputs.digest }}
+          IMAGE_NAME: ${{ steps.identity.outputs.image_name }}
+          IMAGE_REF: ${{ steps.identity.outputs.image_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_name="${GITHUB_REPOSITORY#*/}"
+          versions_json="$(mktemp "${RUNNER_TEMP:?}/atlas-package-before-promote.XXXXXX")"
+          manifest_json="$(mktemp "${RUNNER_TEMP:?}/atlas-image-after-promote.XXXXXX")"
+          trap 'rm -f "$versions_json" "$manifest_json"' EXIT HUP INT TERM
+          gh api --paginate --slurp \
+            "users/${GITHUB_REPOSITORY_OWNER}/packages/container/${package_name}/versions?per_page=100" \
+            > "$versions_json"
+          python - "$versions_json" "$GITHUB_REF_NAME" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          pages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          tag = sys.argv[2]
+          if any(
+              tag in version.get("metadata", {}).get("container", {}).get("tags", [])
+              for page in pages
+              for version in page
+          ):
+              raise SystemExit("version tag appeared after the initial absence check")
+          PY
+
+          docker buildx imagetools create \
+            --tag "$IMAGE_REF" "${IMAGE_NAME}@${IMAGE_DIGEST}"
+          docker buildx imagetools inspect \
+            "$IMAGE_REF" --format '{{json .Manifest}}' > "$manifest_json"
+          python - "$manifest_json" "$IMAGE_DIGEST" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if manifest.get("digest") != sys.argv[2]:
+              raise SystemExit("promoted version tag does not resolve to the attested digest")
+          PY
+
+      - name: Record the exact release image identity
+        env:
+          IMAGE_DIGEST: ${{ steps.image_digest.outputs.digest }}
+          IMAGE_NAME: ${{ steps.identity.outputs.image_name }}
+          VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Buildx returned an invalid image digest" >&2
+            exit 66
+          fi
+          printf '%s@%s\n' "$IMAGE_NAME" "$IMAGE_DIGEST" \
+            > "dist/atlasrepo-research-${VERSION}-image-digest.txt"
+
+      - name: Create and verify release checksums
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd dist
+          sha256sum \
+            "atlasrepo_research-${VERSION}-py3-none-any.whl" \
+            "atlasrepo_research-${VERSION}.tar.gz" \
+            "atlasrepo-research-${VERSION}-source.spdx.json" \
+            "atlasrepo-research-${VERSION}-image-digest.txt" \
+            > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Attest release asset provenance
+        if: steps.identity.outputs.release_state != 'published_exact'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Attest package source SBOM
+        if: steps.identity.outputs.release_state != 'published_exact'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/atlasrepo_research-${{ steps.identity.outputs.version }}-py3-none-any.whl
+            dist/atlasrepo_research-${{ steps.identity.outputs.version }}.tar.gz
+          sbom-path: dist/atlasrepo-research-${{ steps.identity.outputs.version }}-source.spdx.json
+
+      - name: Verify every immutable release asset attestation without mutation
+        if: steps.identity.outputs.release_state == 'published_exact'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          verification_json="$(mktemp "${RUNNER_TEMP:?}/atlas-asset-attestation.XXXXXX")"
+          trap 'rm -f "$verification_json"' EXIT HUP INT TERM
+          verify_asset_attestation() {
+            local subject="$1"
+            local predicate="$2"
+            gh attestation verify "$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+              --signer-digest "$GITHUB_SHA" \
+              --source-digest "$GITHUB_SHA" \
+              --source-ref "$GITHUB_REF" \
+              --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --deny-self-hosted-runners \
+              --predicate-type "$predicate" \
+              --limit 1000 \
+              --format json > "$verification_json"
+            python - "$verification_json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          results = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if not isinstance(results, list) or not results:
+              raise SystemExit("no exact trusted asset attestation was verified")
+          PY
+          }
+
+          while read -r expected_digest asset_name; do
+            [[ "$expected_digest" =~ ^[0-9a-f]{64}$ ]]
+            test -f "dist/$asset_name"
+            verify_asset_attestation \
+              "dist/$asset_name" "https://slsa.dev/provenance/v1"
+          done < dist/SHA256SUMS
+
+          verify_asset_attestation \
+            "dist/atlasrepo_research-${VERSION}-py3-none-any.whl" \
+            "https://spdx.dev/Document/v2.3"
+          verify_asset_attestation \
+            "dist/atlasrepo_research-${VERSION}.tar.gz" \
+            "https://spdx.dev/Document/v2.3"
+
+      - name: Create or resume the exact draft and upload missing assets
+        id: draft_release
+        if: steps.identity.outputs.release_state != 'published_exact'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.identity.outputs.release_id }}
+          RELEASE_NOTES: ${{ steps.identity.outputs.release_notes }}
+          RELEASE_STATE: ${{ steps.identity.outputs.release_state }}
+          VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          verify_remote_identity() {
+            remote_tag_sha="$(
+              git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" \
+                "refs/tags/${GITHUB_REF_NAME}^{}" | awk 'NR == 1 { print $1 }'
+            )"
+            if test -z "$remote_tag_sha"; then
+              remote_tag_sha="$(
+                git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" \
+                  "refs/tags/${GITHUB_REF_NAME}" | awk 'NR == 1 { print $1 }'
+              )"
+            fi
+            test "$remote_tag_sha" = "${GITHUB_SHA}"
+            remote_main_sha="$(
+              git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" \
+                "refs/heads/main" | awk 'NR == 1 { print $1 }'
+            )"
+            test "$remote_main_sha" = "${GITHUB_SHA}"
+          }
+
+          verify_remote_identity
+          create_payload="$(mktemp "${RUNNER_TEMP:?}/atlas-create-release.XXXXXX")"
+          release_json="$(mktemp "${RUNNER_TEMP:?}/atlas-draft-release.XXXXXX")"
+          asset_pages="$(mktemp "${RUNNER_TEMP:?}/atlas-draft-assets.XXXXXX")"
+          asset_plan="$(mktemp "${RUNNER_TEMP:?}/atlas-asset-plan.XXXXXX")"
+          upload_response="$(mktemp "${RUNNER_TEMP:?}/atlas-upload-response.XXXXXX")"
+          trap 'rm -f "$create_payload" "$release_json" "$asset_pages" "$asset_plan" "$upload_response"' \
+            EXIT HUP INT TERM
+          # RELEASE_ID is an Actions step output and is intentionally empty for absent releases.
+          # shellcheck disable=SC2153
+          release_id="$RELEASE_ID"
+          case "$RELEASE_STATE" in
+            absent)
+              test -z "$release_id"
+              python - "$create_payload" "$GITHUB_REF_NAME" "$RELEASE_NOTES" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          payload = {
+              "tag_name": sys.argv[2],
+              "target_commitish": "main",
+              "name": f"Atlas Research {sys.argv[2]}",
+              "body": pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"),
+              "draft": True,
+              "prerelease": False,
+              "make_latest": "false",
+          }
+          pathlib.Path(sys.argv[1]).write_text(
+              json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+              encoding="utf-8",
+          )
+          PY
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+                --input "$create_payload" > "$release_json"
+              release_id="$(python - "$release_json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          release_id = release.get("id")
+          if not isinstance(release_id, int) or isinstance(release_id, bool) or release_id <= 0:
+              raise SystemExit("created draft has an invalid release id")
+          print(release_id)
+          PY
+              )"
+              ;;
+            draft)
+              [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+              ;;
+            *) echo "invalid mutable release state from identity gate" >&2; exit 68 ;;
+          esac
+
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+          printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
+          existing_assets_verified=false
+          for attempt in $(seq 1 10); do
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "$release_json"
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+              > "$asset_pages"
+            if python - "$release_json" "$asset_pages" dist "$GITHUB_REF_NAME" "$VERSION" \
+              "$RELEASE_NOTES" "$release_id" > "$asset_plan" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          asset_pages = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          asset_root = pathlib.Path(sys.argv[3])
+          tag = sys.argv[4]
+          version = sys.argv[5]
+          expected_body = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
+          expected_id = int(sys.argv[7])
+          expected_state = {
+              "id": expected_id,
+              "tag_name": tag,
+              "target_commitish": "main",
+              "name": f"Atlas Research {tag}",
+              "body": expected_body,
+              "draft": True,
+              "prerelease": False,
+              "immutable": False,
+              "published_at": None,
+          }
+          actual_state = {key: release.get(key) for key in expected_state}
+          if actual_state != expected_state:
+              raise SystemExit(f"release is not the exact resumable draft: {actual_state!r}")
+
+          expected_names = {
+              "SHA256SUMS",
+              f"atlasrepo-research-{version}-image-digest.txt",
+              f"atlasrepo-research-{version}-source.spdx.json",
+              f"atlasrepo_research-{version}-py3-none-any.whl",
+              f"atlasrepo_research-{version}.tar.gz",
+          }
+          entries = sorted(asset_root.iterdir())
+          if any(not path.is_file() for path in entries):
+              raise SystemExit("dist contains a non-file entry")
+          local = {
+              path.name: (
+                  path.stat().st_size,
+                  f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+              )
+              for path in entries
+          }
+          if set(local) != expected_names:
+              raise SystemExit(f"local release asset set is not exact: {sorted(local)!r}")
+
+          if not isinstance(asset_pages, list) or any(not isinstance(page, list) for page in asset_pages):
+              raise SystemExit("draft release asset pagination response is invalid")
+          assets = [asset for page in asset_pages for asset in page]
+          if any(not isinstance(asset, dict) for asset in assets):
+              raise SystemExit("draft release asset pagination contains an invalid asset")
+          remote_names = [asset.get("name") for asset in assets]
+          if len(remote_names) != len(set(remote_names)):
+              raise SystemExit("draft release contains duplicate asset names")
+          extra = set(remote_names) - expected_names
+          if extra:
+              raise SystemExit(f"draft release contains extra assets: {sorted(extra)!r}")
+          uploaded_names = set()
+          starter_assets = []
+          for asset in assets:
+              name = asset["name"]
+              state = asset.get("state")
+              if state == "starter":
+                  asset_id = asset.get("id")
+                  if (
+                      not isinstance(asset_id, int)
+                      or isinstance(asset_id, bool)
+                      or asset_id <= 0
+                      or not isinstance(asset.get("size"), int)
+                      or isinstance(asset.get("size"), bool)
+                      or asset.get("size") != 0
+                      or asset.get("digest") is not None
+                  ):
+                      raise SystemExit(f"draft starter asset {name!r} is not safely recoverable")
+                  starter_assets.append((asset_id, name))
+                  continue
+              if state != "uploaded":
+                  raise SystemExit(f"draft asset {name!r} has invalid state {state!r}")
+              uploaded_names.add(name)
+              remote_identity = (asset.get("size"), asset.get("digest"))
+              if asset.get("digest") is None and asset.get("size") == local[name][0]:
+                  raise SystemExit(75)
+              if remote_identity != local[name]:
+                  raise SystemExit(
+                      f"draft asset {name!r} mismatch: "
+                      f"remote={remote_identity!r} local={local[name]!r}"
+                  )
+          for asset_id, name in sorted(starter_assets):
+              print("delete", asset_id, name, sep="\t")
+          for name in sorted(expected_names - uploaded_names):
+              print("upload", asset_root / name, sep="\t")
+          PY
+            then
+              existing_assets_verified=true
+              break
+            else
+              validation_status=$?
+              if test "$validation_status" -ne 75 || test "$attempt" -eq 10; then
+                exit "$validation_status"
+              fi
+              sleep 2
+            fi
+          done
+          test "$existing_assets_verified" = true
+
+          while IFS=$'\t' read -r action asset_id asset_name; do
+            test "$action" = delete || continue
+            [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
+            test -f "dist/$asset_name"
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+          done < "$asset_plan"
+
+          if awk -F '\t' '$1 == "delete" { found = 1 } END { exit !found }' "$asset_plan"; then
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+              > "$asset_pages"
+            python - "$asset_pages" "$asset_plan" dist <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          pages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+              raise SystemExit("draft release asset pagination response is invalid after cleanup")
+          assets = [asset for page in pages for asset in page]
+          if any(not isinstance(asset, dict) for asset in assets):
+              raise SystemExit("draft release asset response is invalid after cleanup")
+          records = [
+              line.split("\t")
+              for line in pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
+          ]
+          if any(
+              not fields
+              or fields[0] not in {"delete", "upload"}
+              or (fields[0] == "delete" and len(fields) != 3)
+              or (fields[0] == "upload" and len(fields) != 2)
+              for fields in records
+          ):
+              raise SystemExit("release asset recovery plan is invalid")
+          cleanup = [fields for fields in records if fields[0] == "delete"]
+          cleanup_ids = {int(fields[1]) for fields in cleanup}
+          cleanup_names = {fields[2] for fields in cleanup}
+          if any(asset.get("id") in cleanup_ids or asset.get("name") in cleanup_names for asset in assets):
+              raise SystemExit("starter release asset still exists after bounded cleanup")
+          asset_root = pathlib.Path(sys.argv[3])
+          local = {
+              path.name: (
+                  path.stat().st_size,
+                  f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+              )
+              for path in sorted(asset_root.iterdir())
+              if path.is_file()
+          }
+          remote_names = [asset.get("name") for asset in assets]
+          if len(remote_names) != len(set(remote_names)) or not set(remote_names) <= set(local):
+              raise SystemExit("release assets changed during bounded cleanup")
+          upload_names = {
+              pathlib.Path(fields[1]).name
+              for fields in records
+              if fields[0] == "upload"
+          }
+          if set(remote_names) & upload_names:
+              raise SystemExit("planned release asset appeared concurrently during cleanup")
+          for asset in assets:
+              name = asset["name"]
+              if asset.get("state") != "uploaded":
+                  raise SystemExit("release asset changed state during bounded cleanup")
+              if (asset.get("size"), asset.get("digest")) != local[name]:
+                  raise SystemExit("release asset identity changed during bounded cleanup")
+          PY
+          fi
+
+          while IFS=$'\t' read -r action asset_path _; do
+            test "$action" = upload || continue
+            test -n "$asset_path"
+            asset_name="$(basename "$asset_path")"
+            encoded_name="$(python - "$asset_name" <<'PY'
+          import sys
+          import urllib.parse
+
+          print(urllib.parse.quote(sys.argv[1], safe=""))
+          PY
+            )"
+            curl --fail-with-body --silent --show-error \
+              --connect-timeout 15 \
+              --max-time 300 \
+              --request POST \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --header "Content-Type: application/octet-stream" \
+              --data-binary "@${asset_path}" \
+              --output "$upload_response" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${encoded_name}"
+            python - "$upload_response" "$asset_path" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          response = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          asset = pathlib.Path(sys.argv[2])
+          expected = {
+              "name": asset.name,
+              "state": "uploaded",
+              "size": asset.stat().st_size,
+          }
+          actual = {key: response.get(key) for key in expected}
+          if actual != expected:
+              raise SystemExit(f"uploaded release asset identity is not exact: {actual!r}")
+          expected_digest = f"sha256:{hashlib.sha256(asset.read_bytes()).hexdigest()}"
+          if response.get("digest") not in (None, expected_digest):
+              raise SystemExit("uploaded release asset digest is not exact")
+          PY
+          done < "$asset_plan"
+
+      - name: Verify draft assets and publish immutably
+        if: steps.identity.outputs.release_state != 'published_exact'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ steps.image_digest.outputs.digest }}
+          IMAGE_REF: ${{ steps.identity.outputs.image_ref }}
+          RELEASE_ID: ${{ steps.draft_release.outputs.release_id }}
+          RELEASE_NOTES: ${{ steps.identity.outputs.release_notes }}
+          VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          verify_remote_identity() {
+            remote_tag_sha="$(
+              git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" \
+                "refs/tags/${GITHUB_REF_NAME}^{}" | awk 'NR == 1 { print $1 }'
+            )"
+            if test -z "$remote_tag_sha"; then
+              remote_tag_sha="$(
+                git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" \
+                  "refs/tags/${GITHUB_REF_NAME}" | awk 'NR == 1 { print $1 }'
+              )"
+            fi
+            test "$remote_tag_sha" = "${GITHUB_SHA}"
+            remote_main_sha="$(
+              git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" \
+                "refs/heads/main" | awk 'NR == 1 { print $1 }'
+            )"
+            test "$remote_main_sha" = "${GITHUB_SHA}"
+          }
+
+          verify_image_tag() {
+            docker buildx imagetools inspect \
+              "$IMAGE_REF" --format '{{json .Manifest}}' > "$image_manifest"
+            python - "$image_manifest" "$IMAGE_DIGEST" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if manifest.get("digest") != sys.argv[2]:
+              raise SystemExit("version tag no longer resolves to the accepted image digest")
+          PY
+          }
+
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          release_json="$(mktemp "${RUNNER_TEMP:?}/atlas-release.XXXXXX")"
+          asset_pages="$(mktemp "${RUNNER_TEMP:?}/atlas-release-assets.XXXXXX")"
+          image_manifest="$(mktemp "${RUNNER_TEMP:?}/atlas-release-image.XXXXXX")"
+          trap 'rm -f "$release_json" "$asset_pages" "$image_manifest"' EXIT HUP INT TERM
+          assets_verified=false
+          for attempt in $(seq 1 10); do
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" > "$release_json"
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+              > "$asset_pages"
+            if python - "$release_json" "$asset_pages" dist "$GITHUB_REF_NAME" "$VERSION" \
+              "$RELEASE_NOTES" "$RELEASE_ID" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          asset_pages = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          asset_root = pathlib.Path(sys.argv[3])
+          tag = sys.argv[4]
+          version = sys.argv[5]
+          expected_body = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
+          expected_id = int(sys.argv[7])
+          expected_state = {
+              "id": expected_id,
+              "tag_name": tag,
+              "target_commitish": "main",
+              "name": f"Atlas Research {tag}",
+              "body": expected_body,
+              "draft": True,
+              "prerelease": False,
+              "immutable": False,
+              "published_at": None,
+          }
+          actual_state = {key: release.get(key) for key in expected_state}
+          if actual_state != expected_state:
+              raise SystemExit(f"release is not the exact draft before publish: {actual_state!r}")
+
+          expected_names = {
+              "SHA256SUMS",
+              f"atlasrepo-research-{version}-image-digest.txt",
+              f"atlasrepo-research-{version}-source.spdx.json",
+              f"atlasrepo_research-{version}-py3-none-any.whl",
+              f"atlasrepo_research-{version}.tar.gz",
+          }
+          entries = sorted(asset_root.iterdir())
+          if any(not path.is_file() for path in entries):
+              raise SystemExit("dist contains a non-file entry")
+          local = {
+              path.name: (
+                  path.stat().st_size,
+                  f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+              )
+              for path in entries
+          }
+          if set(local) != expected_names:
+              raise SystemExit(f"local release asset set is not exact: {sorted(local)!r}")
+
+          if not isinstance(asset_pages, list) or any(not isinstance(page, list) for page in asset_pages):
+              raise SystemExit("draft release asset pagination response is invalid")
+          assets = [asset for page in asset_pages for asset in page]
+          if any(not isinstance(asset, dict) for asset in assets):
+              raise SystemExit("draft release asset pagination contains an invalid asset")
+          remote_names = [asset.get("name") for asset in assets]
+          if len(remote_names) != len(set(remote_names)):
+              raise SystemExit("draft release contains duplicate asset names")
+          if any(asset.get("state") != "uploaded" for asset in assets):
+              raise SystemExit("draft release contains an asset that is not fully uploaded")
+          if any(asset.get("digest") is None for asset in assets):
+              raise SystemExit(75)
+          remote = {
+              asset["name"]: (asset["size"], asset.get("digest"))
+              for asset in assets
+          }
+          if remote != local:
+              raise SystemExit(f"release asset mismatch: local={local!r} remote={remote!r}")
+          PY
+            then
+              assets_verified=true
+              break
+            else
+              validation_status=$?
+              if test "$validation_status" -ne 75 || test "$attempt" -eq 10; then
+                exit "$validation_status"
+              fi
+              sleep 2
+            fi
+          done
+          test "$assets_verified" = true
+
+          verify_remote_identity
+          verify_image_tag
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false \
+            -f make_latest=false > "$release_json"
+          verify_remote_identity
+          verify_image_tag
+
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" > "$release_json"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+            > "$asset_pages"
+          python - "$release_json" "$asset_pages" dist "$GITHUB_REF_NAME" "$VERSION" \
+            "$RELEASE_NOTES" "$RELEASE_ID" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          asset_pages = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          asset_root = pathlib.Path(sys.argv[3])
+          tag = sys.argv[4]
+          version = sys.argv[5]
+          expected_body = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
+          expected_id = int(sys.argv[7])
+          expected = {
+              "id": expected_id,
+              "tag_name": tag,
+              "target_commitish": "main",
+              "name": f"Atlas Research {tag}",
+              "body": expected_body,
+              "draft": False,
+              "prerelease": False,
+              "immutable": True,
+          }
+          actual = {key: release.get(key) for key in expected}
+          if actual != expected:
+              raise SystemExit(f"published release identity is not exact: {actual!r}")
+          published_at = release.get("published_at")
+          if not isinstance(published_at, str) or not published_at:
+              raise SystemExit("published release has no publication timestamp")
+
+          expected_names = {
+              "SHA256SUMS",
+              f"atlasrepo-research-{version}-image-digest.txt",
+              f"atlasrepo-research-{version}-source.spdx.json",
+              f"atlasrepo_research-{version}-py3-none-any.whl",
+              f"atlasrepo_research-{version}.tar.gz",
+          }
+          entries = sorted(asset_root.iterdir())
+          if any(not path.is_file() for path in entries):
+              raise SystemExit("dist contains a non-file entry")
+          local = {
+              path.name: (
+                  path.stat().st_size,
+                  f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+              )
+              for path in entries
+          }
+          if set(local) != expected_names:
+              raise SystemExit(f"local release asset set is not exact: {sorted(local)!r}")
+
+          if not isinstance(asset_pages, list) or any(not isinstance(page, list) for page in asset_pages):
+              raise SystemExit("published release asset pagination response is invalid")
+          assets = [asset for page in asset_pages for asset in page]
+          if any(not isinstance(asset, dict) for asset in assets):
+              raise SystemExit("published release asset pagination contains an invalid asset")
+          remote_names = [asset.get("name") for asset in assets]
+          if len(remote_names) != len(set(remote_names)):
+              raise SystemExit("published release contains duplicate asset names")
+          if any(asset.get("state") != "uploaded" for asset in assets):
+              raise SystemExit("published release contains an asset that is not fully uploaded")
+          remote = {
+              asset["name"]: (asset.get("size"), asset.get("digest"))
+              for asset in assets
+          }
+          if remote != local:
+              raise SystemExit("immutable release assets changed across publication")
+          PY
+
+      - name: Verify an already immutable release without mutation
+        if: steps.identity.outputs.release_state == 'published_exact'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ steps.image_digest.outputs.digest }}
+          IMAGE_REF: ${{ steps.identity.outputs.image_ref }}
+          RELEASE_ID: ${{ steps.identity.outputs.release_id }}
+          RELEASE_NOTES: ${{ steps.identity.outputs.release_notes }}
+          VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          verify_remote_tag() {
+            remote_tag_sha="$(
+              git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" \
+                "refs/tags/${GITHUB_REF_NAME}^{}" | awk 'NR == 1 { print $1 }'
+            )"
+            if test -z "$remote_tag_sha"; then
+              remote_tag_sha="$(
+                git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" \
+                  "refs/tags/${GITHUB_REF_NAME}" | awk 'NR == 1 { print $1 }'
+              )"
+            fi
+            test "$remote_tag_sha" = "${GITHUB_SHA}"
+          }
+
+          verify_image_tag() {
+            docker buildx imagetools inspect \
+              "$IMAGE_REF" --format '{{json .Manifest}}' > "$image_manifest"
+            python - "$image_manifest" "$IMAGE_DIGEST" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if manifest.get("digest") != sys.argv[2]:
+              raise SystemExit("version tag no longer resolves to the accepted image digest")
+          PY
+          }
+
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          release_json="$(mktemp "${RUNNER_TEMP:?}/atlas-published-release.XXXXXX")"
+          asset_pages="$(mktemp "${RUNNER_TEMP:?}/atlas-published-assets.XXXXXX")"
+          image_manifest="$(mktemp "${RUNNER_TEMP:?}/atlas-published-image.XXXXXX")"
+          trap 'rm -f "$release_json" "$asset_pages" "$image_manifest"' EXIT HUP INT TERM
+          verify_remote_tag
+          verify_image_tag
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" > "$release_json"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+            > "$asset_pages"
+          python - "$release_json" "$asset_pages" dist "$GITHUB_REF_NAME" "$VERSION" \
+            "$RELEASE_NOTES" "$RELEASE_ID" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          asset_pages = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          asset_root = pathlib.Path(sys.argv[3])
+          tag = sys.argv[4]
+          version = sys.argv[5]
+          expected_body = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
+          expected_id = int(sys.argv[7])
+          expected_state = {
+              "id": expected_id,
+              "tag_name": tag,
+              "target_commitish": "main",
+              "name": f"Atlas Research {tag}",
+              "body": expected_body,
+              "draft": False,
+              "prerelease": False,
+              "immutable": True,
+          }
+          actual_state = {key: release.get(key) for key in expected_state}
+          if actual_state != expected_state:
+              raise SystemExit(f"immutable release metadata is not exact: {actual_state!r}")
+          published_at = release.get("published_at")
+          if not isinstance(published_at, str) or not published_at:
+              raise SystemExit("immutable release has no publication timestamp")
+
+          expected_names = {
+              "SHA256SUMS",
+              f"atlasrepo-research-{version}-image-digest.txt",
+              f"atlasrepo-research-{version}-source.spdx.json",
+              f"atlasrepo_research-{version}-py3-none-any.whl",
+              f"atlasrepo_research-{version}.tar.gz",
+          }
+          entries = sorted(asset_root.iterdir())
+          if any(not path.is_file() for path in entries):
+              raise SystemExit("dist contains a non-file entry")
+          local = {
+              path.name: (
+                  path.stat().st_size,
+                  f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+              )
+              for path in entries
+          }
+          if set(local) != expected_names:
+              raise SystemExit(f"local release asset set is not exact: {sorted(local)!r}")
+
+          if not isinstance(asset_pages, list) or any(not isinstance(page, list) for page in asset_pages):
+              raise SystemExit("immutable release asset pagination response is invalid")
+          assets = [asset for page in asset_pages for asset in page]
+          if any(not isinstance(asset, dict) for asset in assets):
+              raise SystemExit("immutable release asset pagination contains an invalid asset")
+          remote_names = [asset.get("name") for asset in assets]
+          if len(remote_names) != len(set(remote_names)):
+              raise SystemExit("immutable release contains duplicate asset names")
+          if any(asset.get("state") != "uploaded" for asset in assets):
+              raise SystemExit("immutable release contains an asset that is not fully uploaded")
+          remote = {
+              asset["name"]: (asset.get("size"), asset.get("digest"))
+              for asset in assets
+          }
+          if remote != local:
+              raise SystemExit(f"immutable release assets are not exact: {remote!r}")
+          PY
+          verify_remote_tag
+          verify_image_tag

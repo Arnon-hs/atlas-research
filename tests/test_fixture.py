@@ -23,7 +23,7 @@ def test_docker_build_context_is_default_deny() -> None:
         "**",
         "!Dockerfile",
         "!dist/",
-        "!dist/atlas_research-*.whl",
+        "!dist/atlasrepo_research-*.whl",
     ]
 
 

@@ -1,0 +1,42 @@
+{
+  "protocol_version": "1",
+  "canonicalization": "RFC8785",
+  "vectors": [
+    {
+      "id": "float-one",
+      "value": { "n": 1.0 },
+      "canonical": "{\"n\":1}",
+      "sha256": "2bfd14f43d17fc7cea24e0917a8879b4b2f880b8baeec1b9d90fbaad655e71bd"
+    },
+    {
+      "id": "small-exponent",
+      "value": { "n": 1e-7 },
+      "canonical": "{\"n\":1e-7}",
+      "sha256": "747d6d23b64d1b2d579adb832b44de31c91c875bbef7a8e397f5d183a746b54b"
+    },
+    {
+      "id": "decimal-threshold",
+      "value": { "n": 1e20 },
+      "canonical": "{\"n\":100000000000000000000}",
+      "sha256": "58d2d5b8dd4228ab5775ce84f996718fa19ed49872271e9649b70cebaca26a09"
+    },
+    {
+      "id": "exponent-threshold",
+      "value": { "n": 1e21 },
+      "canonical": "{\"n\":1e+21}",
+      "sha256": "f1ee2b60ee95a3170fdc07a577e5f3514ced26867443d69da265acadead81007"
+    },
+    {
+      "id": "negative-zero",
+      "value": { "n": -0.0 },
+      "canonical": "{\"n\":0}",
+      "sha256": "f3013f933b9fb80ab6d995e7ad9da36f683837ba1d81e950c943d40111eac2f0"
+    },
+    {
+      "id": "unicode-key-order",
+      "value": { "�": "replacement", "😀": "grin", "€": "euro" },
+      "canonical": "{\"€\":\"euro\",\"😀\":\"grin\",\"�\":\"replacement\"}",
+      "sha256": "b4ce138d8cdffde32ab09dc57e1f51bc5b1d957f8e0aa63e5c76dd5611da5b10"
+    }
+  ]
+}

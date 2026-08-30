@@ -15,7 +15,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY dist/atlas_research-*.whl /tmp/atlas-research-dist/
+COPY dist/atlasrepo_research-*.whl /tmp/atlas-research-dist/
 
 RUN test "${#VCS_REF}" -eq 40 \
     && case "${VCS_REF}" in *[!0-9a-f]*) exit 64 ;; *) true ;; esac \
