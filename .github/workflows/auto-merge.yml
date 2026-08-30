@@ -1,32 +1,49 @@
 name: Queue pull requests for merge
 
 on:
-  pull_request_target:
-    branches: [main]
-    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_run:
+    workflows: [Public quality gates, Dependency review, CodeQL]
+    types: [completed]
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
 
 concurrency:
-  group: auto-merge-${{ github.event.pull_request.number }}
+  group: auto-merge-open-pull-requests
   cancel-in-progress: true
 
 jobs:
   queue:
     name: Enable squash auto-merge
-    if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    if: github.repository == 'Arnon-hs/atlas-research'
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Queue after required checks pass
+      - name: Queue every non-draft pull request
         env:
-          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GH_TOKEN: ${{ github.token }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
         shell: bash
-        run: >-
-          gh pr merge --auto --squash
-          --match-head-commit "${EXPECTED_HEAD_SHA}"
-          "${PR_URL}"
+        run: |
+          set -euo pipefail
+
+          pull_requests="$(mktemp "${RUNNER_TEMP:?}/atlas-auto-merge.XXXXXX")"
+          trap 'rm -f "${pull_requests}"' EXIT HUP INT TERM
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main&per_page=100" \
+            --jq '.[] | select(.draft == false) | [.html_url, .head.sha] | @tsv' \
+            > "${pull_requests}"
+
+          failures=0
+          while IFS=$'\t' read -r pr_url head_sha; do
+            if ! gh pr merge --auto --squash \
+              --match-head-commit "${head_sha}" "${pr_url}"; then
+              echo "::warning title=Auto-merge not queued::${pr_url}"
+              failures=1
+            fi
+          done < "${pull_requests}"
+
+          exit "${failures}"
