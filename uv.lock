@@ -43,7 +43,7 @@ dev = [
     { name = "jsonschema", extras = ["format"], specifier = ">=4.25,<5" },
     { name = "mypy", specifier = ">=1.17,<2" },
     { name = "pip-audit", specifier = ">=2.9,<3" },
-    { name = "pytest", specifier = ">=9.0.3,<10" },
+    { name = "pytest", specifier = ">=9.1.1,<10" },
     { name = "pytest-cov", specifier = ">=6.2,<7" },
     { name = "ruff", specifier = ">=0.12,<1" },
 ]
