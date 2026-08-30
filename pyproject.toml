@@ -3,7 +3,7 @@ requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "atlas-research"
+name = "atlasrepo-research"
 version = "0.1.0"
 description = "Artifact-first offline research and evaluation plane for AtlasRepo"
 readme = "README.md"
