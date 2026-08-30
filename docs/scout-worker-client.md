@@ -20,16 +20,18 @@ The client uses these Scout-owned routes:
 
 - `POST /api/worker/v1/session` with the enrollment credential;
 - `POST /api/worker/v1/claim` with the short-lived session token;
+- `POST /api/worker/v1/telemetry` with the short-lived session token;
 - `GET /api/worker/v1/objects/<opaque-id>` for claimed objects only;
 - `POST /api/worker/v1/heartbeat`;
 - `POST /api/worker/v1/complete`;
 - `POST /api/worker/v1/fail`.
 
-Session, claim, heartbeat, completion, and failure request documents carry
-`protocol_version: "1"` and use closed fields; session and claim responses also
-carry it. Heartbeat responses are exactly `{cancelled, lease_expires_at}` and
-terminal acknowledgements are exactly `{accepted, replayed}` without a protocol
-field. A claim binds `job_id`, `attempt`, monotonic `fence`,
+Session, claim, telemetry, heartbeat, completion, and failure request documents
+carry `protocol_version: "1"` and use closed fields; session, claim, and
+telemetry responses also carry it. Heartbeat responses are exactly
+`{cancelled, lease_expires_at}` and terminal acknowledgements are exactly
+`{accepted, replayed}` without a protocol field. A claim binds `job_id`,
+`attempt`, monotonic `fence`,
 `cancellation_generation`, `lease_expires_at`, `workload_type`, `job_path`, and
 at most 64 `{path, sha256, size_bytes, download_path}` objects. Version 1 accepts
 only `research.experiment`, requires `job_path` to be `job.json`, caps each
@@ -57,6 +59,55 @@ claim deadline is 3000 seconds. A session is admitted only when its remaining
 lifetime is at least `max_job_seconds + 2*lease_seconds +
 2*request_timeout_seconds`; with Scout's 120-second lease this is 3300 seconds,
 below the 3600-second session TTL.
+
+## Sanitized operations telemetry
+
+Telemetry is disabled unless the operator supplies the optional absolute
+`telemetry_file`. AtlasRepo Schema owns the installed value
+`/Users/neo/.local/state/atlas-research/worker-telemetry.json`; it is not
+selected by Scout. The request to `POST /api/worker/v1/telemetry` is exactly
+`{protocol_version, worker_id, session_id}` under the short-lived session
+Bearer token. Its response is exactly
+`{protocol_version, collected_at, queue, totals, history}`. Queue values are a
+current Scout snapshot, while totals and at most 120 strictly ordered history
+points are cumulative Scout receipts. Every counter is a non-negative safe
+integer, failed totals cannot exceed processed totals, and the last history
+point must equal totals. No job/session identifiers, prompt, path, digest,
+error detail, filesystem data, or credential is projected.
+
+The local file has numeric `schema_version: 1`, constant
+`worker_id: "atlasrepo"`, `state`, Scout's fresh `collected_at` copied to
+`updated_at`, the validated queue/totals/history, and `active_model: null` for
+the research executor. Allowed states are `idle`, `running`, `degraded`, and
+`offline`: a claimed job is running; a healthy worker with no active claim is
+idle; controller or local-storage failure is degraded; orderly service stop is
+offline. A deterministic terminal job failure returns the worker to idle and
+does not mark the controller degraded. As a local publication policy, the
+Scout `collected_at` must be inside the inclusive ±30-second window around the
+local clock. This is not an extra Scout wire-contract field or server guarantee.
+
+Persistent `worker serve` uses a separate bounded publisher on a 20-second
+start-to-start cadence and a hard five-second wall-clock request deadline, so a
+slow-drip response, long staging, or execution does not delay lease heartbeats
+or service shutdown. `worker once` attempts one publication after its outcome
+and before exit. Fetch, validation, and pre-rename write failures leave the
+previous file and its `updated_at` unchanged. A directory-fsync or verification
+failure after atomic rename is explicitly commit-ambiguous: the new file may be
+visible while its durability is unknown, so the attempted `collected_at`
+advances the in-process monotonic watermark and an older Scout snapshot cannot
+overwrite it. Before every rename, the writer safely reads the exact existing
+projection through the private directory descriptor and also refuses to
+replace a newer persisted `updated_at`; this preserves monotonicity across
+worker restarts. No telemetry failure can change heartbeat, cancellation,
+completion, failure, or backoff control flow. Publication is serialized.
+
+The writer opens every absolute parent component with `O_NOFOLLOW`, requires
+the direct parent to be operator-owned and private, and rejects an existing
+symlink, hardlink, non-regular, non-private, or foreign-owned target. It writes
+an `O_EXCL|O_NOFOLLOW` same-directory temporary file with mode `0600`, fsyncs
+the file, atomically renames it, fsyncs the directory, and verifies the
+committed inode and link count. The sanitized telemetry file remains separate
+from the worker's operational `status.json`.
 
 ## Failure behavior
 

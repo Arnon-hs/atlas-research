@@ -6,21 +6,24 @@ from __future__ import annotations
 import errno
 import hashlib
 import http.client
+import ipaddress
 import os
 import re
 import shutil
 import signal
+import socket
 import ssl
 import stat
 import subprocess
+import sys
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, Protocol, cast
 from urllib.parse import urlsplit
 
 from .artifacts import atomic_write_private, ensure_private_directory, read_private_bytes
@@ -28,6 +31,15 @@ from .canonical import canonical_json_bytes, strict_json_loads
 from .constants import MAX_ARTIFACT_BYTES, MAX_ARTIFACTS, MAX_JOB_BYTES, MAX_TOTAL_INPUT_BYTES
 from .errors import AtlasResearchError, ResourceLimitError, ValidationError
 from .job import ResearchJob, load_job
+from .operations_telemetry import (
+    MAX_SCOUT_TELEMETRY_BYTES,
+    ScoutTelemetry,
+    TelemetryCommitAmbiguousError,
+    TelemetrySnapshotStaleError,
+    parse_scout_telemetry,
+    validate_telemetry_destination,
+    write_worker_telemetry,
+)
 from .worker import validate_result_document
 
 PROTOCOL_VERSION: Final = "1"
@@ -38,6 +50,31 @@ _MAX_RESULT_BYTES: Final = 256 << 10
 _MAX_TOKEN_BYTES: Final = 512
 _MAX_ERROR_CODE_CHARS: Final = 64
 _FREE_SPACE_RESERVE_BYTES: Final = 1 << 30
+_TELEMETRY_PUBLISH_INTERVAL_SECONDS: Final = 20.0
+_TELEMETRY_REQUEST_TIMEOUT_SECONDS: Final = 5.0
+_MAX_RESOLVER_BYTES: Final = 16 << 10
+_MAX_RESOLVED_ADDRESSES: Final = 16
+_RESOLVER_PROGRAM: Final = """\
+import json
+import socket
+import sys
+
+results = []
+for family, socktype, proto, _canonname, sockaddr in socket.getaddrinfo(
+    sys.argv[1], int(sys.argv[2]), 0, socket.SOCK_STREAM, 0
+):
+    if family == socket.AF_INET:
+        item = [family, socktype, proto, sockaddr[0], sockaddr[1]]
+    elif family == socket.AF_INET6:
+        item = [family, socktype, proto, sockaddr[0], sockaddr[1], sockaddr[2], sockaddr[3]]
+    else:
+        continue
+    if item not in results:
+        results.append(item)
+    if len(results) >= 16:
+        break
+sys.stdout.write(json.dumps(results, separators=(",", ":")))
+"""
 _STORAGE_EXHAUSTION_ERRNOS: Final = frozenset(
     {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
 )
@@ -112,6 +149,7 @@ class WorkerConfig:
     request_timeout_seconds: float = 30.0
     max_job_seconds: int = 3_000
     max_bundle_bytes: int = MAX_TOTAL_INPUT_BYTES
+    telemetry_file: Path | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> WorkerConfig:
@@ -128,6 +166,7 @@ class WorkerConfig:
             "request_timeout_seconds",
             "max_job_seconds",
             "max_bundle_bytes",
+            "telemetry_file",
         }
         if not required.issubset(value) or not set(value).issubset(required | optional):
             raise ValidationError("WORKER_CONFIG_INVALID", "Worker config fields are invalid")
@@ -151,6 +190,9 @@ class WorkerConfig:
             MAX_JOB_BYTES,
             MAX_TOTAL_INPUT_BYTES,
         )
+        telemetry_file = (
+            _absolute_path(value, "telemetry_file") if "telemetry_file" in value else None
+        )
         config = cls(
             controller_url=controller_url,
             worker_id=worker_id,
@@ -161,6 +203,7 @@ class WorkerConfig:
             request_timeout_seconds=request_timeout_seconds,
             max_job_seconds=max_job_seconds,
             max_bundle_bytes=max_bundle_bytes,
+            telemetry_file=telemetry_file,
         )
         config.validate_local_paths()
         return config
@@ -169,6 +212,8 @@ class WorkerConfig:
         _read_secret_file(self.enrollment_token_file)
         ensure_private_directory(self.state_root)
         _validate_executor(self.executor_path)
+        if self.telemetry_file is not None:
+            validate_telemetry_destination(self.telemetry_file)
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +258,18 @@ class RemoteClaim:
 class HeartbeatReply:
     cancelled: bool
     lease_expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedAddress:
+    family: int
+    socktype: int
+    proto: int
+    sockaddr: tuple[str, int] | tuple[str, int, int, int]
+
+
+class _ConnectionWithFactory(Protocol):
+    _create_connection: Callable[[tuple[str, int], object, tuple[str, int] | None], socket.socket]
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,18 +446,24 @@ def _controller_origin(raw: str) -> tuple[str, str, int]:
     if parsed.path not in {"", "/"} or parsed.hostname is None:
         raise ValidationError("WORKER_CONFIG_INVALID", "Controller URL must be one origin")
     try:
+        host = parsed.hostname.encode("idna").decode("ascii")
+    except UnicodeError as error:
+        raise ValidationError("WORKER_CONFIG_INVALID", "Controller hostname is invalid") from error
+    if not 1 <= len(host) <= 253 or any(ord(character) <= 0x20 for character in host):
+        raise ValidationError("WORKER_CONFIG_INVALID", "Controller hostname is invalid")
+    try:
         parsed_port = parsed.port
     except ValueError as error:
         raise ValidationError("WORKER_CONFIG_INVALID", "Controller URL port is invalid") from error
     if parsed.scheme == "https":
         port = parsed_port or 443
-    elif parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1"}:
+    elif parsed.scheme == "http" and host in {"127.0.0.1", "::1"}:
         port = parsed_port or 80
     else:
         raise ValidationError(
             "WORKER_CONFIG_INVALID", "Controller URL must use HTTPS or loopback HTTP"
         )
-    return parsed.scheme, parsed.hostname, port
+    return parsed.scheme, host, port
 
 
 def _read_secret_file(path: Path) -> str:
@@ -627,6 +690,128 @@ def _claim_from_mapping(value: Mapping[str, object], max_bundle_bytes: int) -> R
     )
 
 
+def _terminate_resolver(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    with suppress(OSError):
+        process.terminate()
+    try:
+        process.wait(timeout=0.1)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    with suppress(OSError):
+        process.kill()
+    process.wait()
+
+
+def _resolved_addresses(value: object, port: int) -> tuple[_ResolvedAddress, ...]:
+    if not isinstance(value, list) or not 1 <= len(value) <= _MAX_RESOLVED_ADDRESSES:
+        raise ValidationError("WORKER_RESOLVER_INVALID", "Worker resolver response is invalid")
+    resolved: list[_ResolvedAddress] = []
+    for raw_item in value:
+        if not isinstance(raw_item, list) or len(raw_item) not in {5, 7}:
+            raise ValidationError("WORKER_RESOLVER_INVALID", "Worker resolver response is invalid")
+        family, socktype, proto, address, resolved_port, *ipv6_values = raw_item
+        if (
+            isinstance(family, bool)
+            or not isinstance(family, int)
+            or isinstance(socktype, bool)
+            or socktype != socket.SOCK_STREAM
+            or isinstance(proto, bool)
+            or not isinstance(proto, int)
+            or proto not in {0, socket.IPPROTO_TCP}
+            or not isinstance(address, str)
+            or "%" in address
+            or isinstance(resolved_port, bool)
+            or not isinstance(resolved_port, int)
+            or resolved_port != port
+        ):
+            raise ValidationError("WORKER_RESOLVER_INVALID", "Worker resolver response is invalid")
+        try:
+            parsed_address = ipaddress.ip_address(address)
+        except ValueError as error:
+            raise ValidationError(
+                "WORKER_RESOLVER_INVALID", "Worker resolver response is invalid"
+            ) from error
+        if family == socket.AF_INET and len(raw_item) == 5 and parsed_address.version == 4:
+            sockaddr: tuple[str, int] | tuple[str, int, int, int] = (address, resolved_port)
+        elif family == socket.AF_INET6 and len(raw_item) == 7 and parsed_address.version == 6:
+            flowinfo, scope_id = ipv6_values
+            if (
+                isinstance(flowinfo, bool)
+                or not isinstance(flowinfo, int)
+                or not 0 <= flowinfo <= 0xFFFFFFFF
+                or isinstance(scope_id, bool)
+                or not isinstance(scope_id, int)
+                or not 0 <= scope_id <= 0xFFFFFFFF
+            ):
+                raise ValidationError(
+                    "WORKER_RESOLVER_INVALID", "Worker resolver response is invalid"
+                )
+            sockaddr = (address, resolved_port, flowinfo, scope_id)
+        else:
+            raise ValidationError("WORKER_RESOLVER_INVALID", "Worker resolver response is invalid")
+        item = _ResolvedAddress(family, socktype, proto, sockaddr)
+        if item not in resolved:
+            resolved.append(item)
+    if not resolved:
+        raise ValidationError("WORKER_RESOLVER_INVALID", "Worker resolver response is invalid")
+    return tuple(resolved)
+
+
+def _resolve_controller_addresses(
+    host: str,
+    port: int,
+    *,
+    deadline: float,
+    cancel_event: threading.Event | None,
+) -> tuple[_ResolvedAddress, ...]:
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-c", _RESOLVER_PROGRAM, host, str(port)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env={},
+        close_fds=True,
+        start_new_session=True,
+    )
+    try:
+        while process.poll() is None:
+            if (cancel_event is not None and cancel_event.is_set()) or time.monotonic() >= deadline:
+                raise TimeoutError("worker resolver deadline expired")
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        if (cancel_event is not None and cancel_event.is_set()) or time.monotonic() >= deadline:
+            raise TimeoutError("worker resolver deadline expired")
+        stdout, _stderr = process.communicate()
+        if process.returncode != 0 or len(stdout) > _MAX_RESOLVER_BYTES:
+            raise OSError("worker resolver failed")
+        return _resolved_addresses(
+            strict_json_loads(stdout, max_bytes=_MAX_RESOLVER_BYTES),
+            port,
+        )
+    finally:
+        _terminate_resolver(process)
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def _duplicate_interrupt_socket(active_socket: socket.socket) -> socket.socket:
+    """Duplicate the transport FD as a raw socket, including for TLS wrappers."""
+
+    duplicate_fd = os.dup(active_socket.fileno())
+    try:
+        return socket.socket(
+            family=active_socket.family,
+            type=active_socket.type,
+            proto=active_socket.proto,
+            fileno=duplicate_fd,
+        )
+    except BaseException:
+        os.close(duplicate_fd)
+        raise
+
+
 class ScoutWorkerClient:
     """Small HTTP client that rejects redirects and cross-origin object URLs."""
 
@@ -634,17 +819,16 @@ class ScoutWorkerClient:
         self.config = config
         self.scheme, self.host, self.port = _controller_origin(config.controller_url)
 
-    def _connection(self) -> http.client.HTTPConnection:
+    def _connection(self, timeout_seconds: float | None = None) -> http.client.HTTPConnection:
+        timeout = timeout_seconds or self.config.request_timeout_seconds
         if self.scheme == "https":
             return http.client.HTTPSConnection(
                 self.host,
                 self.port,
-                timeout=self.config.request_timeout_seconds,
+                timeout=timeout,
                 context=ssl.create_default_context(),
             )
-        return http.client.HTTPConnection(
-            self.host, self.port, timeout=self.config.request_timeout_seconds
-        )
+        return http.client.HTTPConnection(self.host, self.port, timeout=timeout)
 
     def _request(
         self,
@@ -655,6 +839,9 @@ class ScoutWorkerClient:
         payload: Mapping[str, object] | None = None,
         expected: Sequence[int] = (200,),
         maximum: int = _MAX_CONTROL_BYTES,
+        timeout_seconds: float | None = None,
+        hard_deadline_seconds: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[int, bytes, Mapping[str, str]]:
         if not path.startswith("/") or "//" in path or any(item in path for item in ("?", "#")):
             raise ValidationError("WORKER_PROTOCOL_INVALID", "Worker request path is invalid")
@@ -668,12 +855,139 @@ class ScoutWorkerClient:
         if data is not None:
             headers["Content-Type"] = "application/json"
             headers["Content-Length"] = str(len(data))
-        connection = self._connection()
+        connection = self._connection(timeout_seconds)
+        if hard_deadline_seconds is None and cancel_event is not None:
+            hard_deadline_seconds = timeout_seconds or self.config.request_timeout_seconds
+        deadline = (
+            time.monotonic() + hard_deadline_seconds if hard_deadline_seconds is not None else None
+        )
+        aborted = threading.Event()
+        finished = threading.Event()
+        watchdog: threading.Thread | None = None
+        connecting_socket: socket.socket | None = None
+        interrupt_socket: socket.socket | None = None
+        response: http.client.HTTPResponse | None = None
+        resolved_addresses: tuple[_ResolvedAddress, ...] = ()
+
+        def check_active() -> None:
+            if (
+                aborted.is_set()
+                or (cancel_event is not None and cancel_event.is_set())
+                or (deadline is not None and time.monotonic() >= deadline)
+            ):
+                aborted.set()
+                raise TimeoutError("worker request deadline expired")
+
+        def abort_socket() -> None:
+            for active_socket in (connecting_socket, connection.sock, interrupt_socket):
+                if active_socket is None:
+                    continue
+                with suppress(OSError):
+                    active_socket.shutdown(socket.SHUT_RDWR)
+
+        def connect_resolved(
+            _address: tuple[str, int],
+            _timeout: object,
+            source_address: tuple[str, int] | None,
+        ) -> socket.socket:
+            nonlocal connecting_socket, interrupt_socket
+            last_error: OSError | None = None
+            for index, resolved in enumerate(resolved_addresses):
+                check_active()
+                assert deadline is not None
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    check_active()
+                remaining_candidates = len(resolved_addresses) - index
+                attempt_seconds = remaining_seconds / remaining_candidates
+                candidate: socket.socket | None = None
+                connected = False
+                try:
+                    candidate = socket.socket(resolved.family, resolved.socktype, resolved.proto)
+                    connecting_socket = candidate
+                    candidate.settimeout(max(0.001, attempt_seconds))
+                    if source_address is not None:
+                        candidate.bind(source_address)
+                    candidate.connect(resolved.sockaddr)
+                    connected = True
+                    check_active()
+                    interrupt_socket = _duplicate_interrupt_socket(candidate)
+                    return candidate
+                except OSError as error:
+                    last_error = error
+                    if candidate is not None:
+                        candidate.close()
+                    connecting_socket = None
+                    if connected or aborted.is_set() or time.monotonic() >= deadline:
+                        raise
+            if last_error is not None:
+                raise last_error
+            raise OSError("worker resolver returned no usable addresses")
+
+        def watch_request() -> None:
+            while not finished.is_set():
+                if cancel_event is not None and cancel_event.is_set():
+                    aborted.set()
+                if deadline is not None and time.monotonic() >= deadline:
+                    aborted.set()
+                if aborted.is_set():
+                    abort_socket()
+                    if finished.wait(0.01):
+                        return
+                    continue
+                wait_seconds = 0.01
+                if deadline is not None:
+                    wait_seconds = min(wait_seconds, max(0.0, deadline - time.monotonic()))
+                finished.wait(wait_seconds)
+
+        if deadline is not None or cancel_event is not None:
+            watchdog = threading.Thread(
+                target=watch_request,
+                name="atlas-research-worker-telemetry-request-watchdog",
+                daemon=True,
+            )
+            watchdog.start()
+
+        def read_response(response: http.client.HTTPResponse, limit: int) -> bytes:
+            if deadline is None and cancel_event is None:
+                return response.read(limit)
+            chunks: list[bytes] = []
+            remaining = limit
+            while remaining > 0:
+                check_active()
+                if deadline is not None and connection.sock is not None:
+                    connection.sock.settimeout(max(0.001, deadline - time.monotonic()))
+                chunk = response.read1(min(65_536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            check_active()
+            return b"".join(chunks)
+
         try:
+            check_active()
+            if deadline is not None:
+                resolved_addresses = _resolve_controller_addresses(
+                    self.host,
+                    self.port,
+                    deadline=deadline,
+                    cancel_event=cancel_event,
+                )
+                cast(_ConnectionWithFactory, connection)._create_connection = connect_resolved
+            check_active()
             connection.request(method, path, body=data, headers=headers)
+            if deadline is not None or cancel_event is not None:
+                active_socket = connection.sock
+                if active_socket is None:
+                    raise OSError("worker request socket is unavailable")
+                if interrupt_socket is None:
+                    interrupt_socket = _duplicate_interrupt_socket(active_socket)
+            check_active()
             response = connection.getresponse()
+            check_active()
             if response.status not in expected:
-                response.read(min(maximum, 4_096))
+                read_response(response, min(maximum, 4_096))
                 if response.status in {401, 403}:
                     raise RemoteWorkerError(
                         "WORKER_AUTH_REJECTED", "Scout rejected worker authentication"
@@ -697,7 +1011,7 @@ class ScoutWorkerClient:
                     raise ResourceLimitError(
                         "WORKER_RESPONSE_EXCEEDED", "Scout response is too large"
                     )
-            body = response.read(maximum + 1)
+            body = read_response(response, maximum + 1)
             if len(body) > maximum:
                 raise ResourceLimitError("WORKER_RESPONSE_EXCEEDED", "Scout response is too large")
             normalized_headers = {key.lower(): value for key, value in response.getheaders()}
@@ -707,7 +1021,14 @@ class ScoutWorkerClient:
                 "WORKER_CONTROLLER_UNAVAILABLE", "Scout controller is unavailable"
             ) from error
         finally:
+            finished.set()
+            if watchdog is not None:
+                watchdog.join()
+            if response is not None:
+                response.close()
             connection.close()
+            if interrupt_socket is not None:
+                interrupt_socket.close()
 
     def exchange_session(self) -> WorkerSession:
         enrollment = _read_secret_file(self.config.enrollment_token_file)
@@ -746,6 +1067,43 @@ class ScoutWorkerClient:
             _mapping(strict_json_loads(body, max_bytes=_MAX_CONTROL_BYTES), "WORKER_CLAIM_INVALID"),
             self.config.max_bundle_bytes,
         )
+
+    def telemetry(
+        self,
+        session: WorkerSession,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> ScoutTelemetry:
+        timeout_seconds = min(
+            self.config.request_timeout_seconds, _TELEMETRY_REQUEST_TIMEOUT_SECONDS
+        )
+        _status, body, headers = self._request(
+            "POST",
+            "/api/worker/v1/telemetry",
+            token=session.token,
+            payload={
+                "protocol_version": PROTOCOL_VERSION,
+                "worker_id": self.config.worker_id,
+                "session_id": session.session_id,
+            },
+            maximum=MAX_SCOUT_TELEMETRY_BYTES,
+            timeout_seconds=timeout_seconds,
+            hard_deadline_seconds=timeout_seconds,
+            cancel_event=cancel_event,
+        )
+        if (
+            headers.get("content-type", "").lower() != "application/json; charset=utf-8"
+            or headers.get("content-encoding", "identity").lower() != "identity"
+            or headers.get("cache-control", "").lower() != "no-store"
+            or (
+                headers.get("content-length") is not None
+                and headers.get("content-length") != str(len(body))
+            )
+        ):
+            raise ValidationError(
+                "WORKER_TELEMETRY_INVALID", "Scout telemetry response headers are invalid"
+            )
+        return parse_scout_telemetry(strict_json_loads(body, max_bytes=MAX_SCOUT_TELEMETRY_BYTES))
 
     def download(self, session: WorkerSession, artifact: RemoteArtifact) -> bytes:
         try:
@@ -971,6 +1329,48 @@ def _unseal_artifact_directories(root: Path) -> None:
             raise ValidationError("WORKER_ARTIFACT_INVALID", "Staged artifact is unsafe")
 
 
+class _TelemetryPublisher:
+    """Publish on a fixed cadence without sharing the claim execution thread."""
+
+    def __init__(
+        self,
+        publish: Callable[[threading.Event], bool],
+        interval_seconds: float,
+    ) -> None:
+        self._publish = publish
+        self._interval_seconds = interval_seconds
+        self._done = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("telemetry publisher already started")
+        self._thread = threading.Thread(
+            target=self._run,
+            name="atlas-research-worker-telemetry",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        next_publish = time.monotonic()
+        while not self._done.is_set():
+            wait_seconds = max(0.0, next_publish - time.monotonic())
+            if self._done.wait(wait_seconds):
+                return
+            with suppress(Exception):
+                self._publish(self._done)
+            next_publish = max(next_publish + self._interval_seconds, time.monotonic())
+
+    def stop(self) -> bool:
+        self._done.set()
+        thread = self._thread
+        if thread is None:
+            return True
+        thread.join(timeout=_TELEMETRY_REQUEST_TIMEOUT_SECONDS + 1.0)
+        return not thread.is_alive()
+
+
 class RemoteWorker:
     """Persistent single-concurrency worker supervised by launchd or systemd."""
 
@@ -980,6 +1380,11 @@ class RemoteWorker:
         self.stop_event = threading.Event()
         self._session: WorkerSession | None = None
         self._runs_root = _mkdir_private(config.state_root / "runs")
+        self._telemetry_state = "idle"
+        self._telemetry_state_lock = threading.Lock()
+        self._telemetry_publish_lock = threading.Lock()
+        self._last_telemetry_at: datetime | None = None
+        self._telemetry_background = False
 
     def install_signal_handlers(self) -> None:
         def stop(_signum: int, _frame: object) -> None:
@@ -987,6 +1392,55 @@ class RemoteWorker:
 
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
+
+    def _set_telemetry_state(self, state: str) -> None:
+        with self._telemetry_state_lock:
+            self._telemetry_state = state
+
+    def _publish_telemetry_once(
+        self,
+        cancel_event: threading.Event | None = None,
+    ) -> bool:
+        destination = self.config.telemetry_file
+        if destination is None or (cancel_event is not None and cancel_event.is_set()):
+            return False
+        if not self._telemetry_publish_lock.acquire(
+            timeout=_TELEMETRY_REQUEST_TIMEOUT_SECONDS + 1.0
+        ):
+            return False
+        try:
+            session = self._session
+            if session is None or session.expires_at <= datetime.now(UTC):
+                return False
+            telemetry = self.client.telemetry(session, cancel_event=cancel_event)
+            if cancel_event is not None and cancel_event.is_set():
+                return False
+            if (
+                self._last_telemetry_at is not None
+                and telemetry.collected_at_value < self._last_telemetry_at
+            ):
+                return False
+            with self._telemetry_state_lock:
+                state = self._telemetry_state
+            write_worker_telemetry(
+                destination,
+                telemetry.projection(state),
+                watermark=telemetry.collected_at_value,
+            )
+            self._last_telemetry_at = telemetry.collected_at_value
+            return True
+        except TelemetryCommitAmbiguousError as error:
+            if self._last_telemetry_at is None or error.watermark > self._last_telemetry_at:
+                self._last_telemetry_at = error.watermark
+            return False
+        except TelemetrySnapshotStaleError as error:
+            if self._last_telemetry_at is None or error.watermark > self._last_telemetry_at:
+                self._last_telemetry_at = error.watermark
+            return False
+        except Exception:
+            return False
+        finally:
+            self._telemetry_publish_lock.release()
 
     def _status(
         self,
@@ -1403,47 +1857,72 @@ class RemoteWorker:
             supervisor.stop()
 
     def run_once(self) -> RunOutcome:
-        session = self._session_or_exchange()
-        self._status("claiming")
-        claim = self.client.claim(session)
-        if claim is None:
-            self._prune_runs(None)
-            self._status("idle")
-            return RunOutcome("idle")
-        claim_started_at = time.monotonic()
-        return self._process_claim(session, claim, claim_started_at)
+        try:
+            session = self._session_or_exchange()
+            self._status("claiming")
+            claim = self.client.claim(session)
+            if claim is None:
+                self._prune_runs(None)
+                self._status("idle")
+                outcome = RunOutcome("idle")
+            else:
+                self._set_telemetry_state("running")
+                claim_started_at = time.monotonic()
+                outcome = self._process_claim(session, claim, claim_started_at)
+            self._set_telemetry_state("idle")
+            return outcome
+        except (OSError, AtlasResearchError):
+            self._set_telemetry_state("degraded")
+            raise
+        finally:
+            if not self._telemetry_background:
+                self._publish_telemetry_once()
 
     def serve(self) -> RunOutcome:
         delay = self.config.poll_seconds
         last = RunOutcome("starting")
         self._status_best_effort("starting")
-        while not self.stop_event.is_set():
-            try:
-                last = self.run_once()
-                delay = self.config.poll_seconds
-            except RemoteWorkerError as error:
-                if error.code == "WORKER_AUTH_REJECTED":
-                    self._session = None
-                self._status_best_effort("backoff", error_code=error.code)
-                last = RunOutcome("backoff", error_code=error.code)
-                delay = min(max(self.config.poll_seconds, delay * 2), 60.0)
-            except OSError as error:
-                operational = _local_operational_error(error)
-                assert operational is not None
-                code = operational.code
-                self._status_best_effort("backoff", error_code=code)
-                last = RunOutcome("backoff", error_code=code)
-                delay = min(max(self.config.poll_seconds, delay * 2), 60.0)
-            except AtlasResearchError as error:
-                operational = _local_operational_error(error)
-                code = operational.code if operational is not None else error.code
-                self._status_best_effort("backoff", error_code=code)
-                last = RunOutcome("backoff", error_code=code)
-                delay = min(max(self.config.poll_seconds, delay * 2), 60.0)
-            if not self.stop_event.is_set():
-                self.stop_event.wait(delay)
-        self._status_best_effort("stopped")
-        return last
+        publisher: _TelemetryPublisher | None = None
+        if self.config.telemetry_file is not None:
+            self._telemetry_background = True
+            publisher = _TelemetryPublisher(
+                self._publish_telemetry_once, _TELEMETRY_PUBLISH_INTERVAL_SECONDS
+            )
+            publisher.start()
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    last = self.run_once()
+                    delay = self.config.poll_seconds
+                except RemoteWorkerError as error:
+                    if error.code == "WORKER_AUTH_REJECTED":
+                        self._session = None
+                    self._status_best_effort("backoff", error_code=error.code)
+                    last = RunOutcome("backoff", error_code=error.code)
+                    delay = min(max(self.config.poll_seconds, delay * 2), 60.0)
+                except OSError as error:
+                    operational = _local_operational_error(error)
+                    assert operational is not None
+                    code = operational.code
+                    self._status_best_effort("backoff", error_code=code)
+                    last = RunOutcome("backoff", error_code=code)
+                    delay = min(max(self.config.poll_seconds, delay * 2), 60.0)
+                except AtlasResearchError as error:
+                    operational = _local_operational_error(error)
+                    code = operational.code if operational is not None else error.code
+                    self._status_best_effort("backoff", error_code=code)
+                    last = RunOutcome("backoff", error_code=code)
+                    delay = min(max(self.config.poll_seconds, delay * 2), 60.0)
+                if not self.stop_event.is_set():
+                    self.stop_event.wait(delay)
+            return last
+        finally:
+            self._set_telemetry_state("offline")
+            publisher_stopped = publisher is None or publisher.stop()
+            self._telemetry_background = False
+            if publisher_stopped:
+                self._publish_telemetry_once()
+            self._status_best_effort("stopped")
 
 
 def load_worker_config(path: Path) -> WorkerConfig:
