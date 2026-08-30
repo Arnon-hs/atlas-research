@@ -17,8 +17,9 @@ Atlas Research defines portable `research.experiment` job and result payloads
 and implements an offline runner. It does not expose claim, heartbeat, cancel,
 or result-commit endpoints.
 
-If remote execution is later approved, Scout owns those endpoints and mutable
-job state. The protocol must use atomic claim, worker/session identity,
+Remote research execution was approved for implementation on 2026-08-30.
+Scout owns its endpoints and mutable job state. The protocol uses atomic claim,
+worker/session identity,
 monotonic attempt and fencing tokens, heartbeat renewal, idempotent terminal
 commit, cancellation, expiry rejection, and independent reconciliation.
 
@@ -30,5 +31,7 @@ administration secrets.
 
 - v0.1 can be verified without inventing a premature distributed system.
 - Research payloads remain reusable when Scout later adds remote orchestration.
-- Remote execution cannot ship until the Scout API and topology pass their own
-  design, security, and failure-mode review.
+- Atlas Research may ship an outbound client but never the controller or a
+  server-selected command executor.
+- Remote execution remains disabled until the Scout API and Schema topology
+  pass their own design, security, and failure-mode review.

@@ -18,12 +18,13 @@ The roadmap describes direction, not a delivery promise.
 - explicit preview-only candidate handoff;
 - human review receipts and rejection reasons;
 - schema compatibility fixtures shared by artifact, not copied runtime logic.
+- Scout-owned remote research claim/heartbeat/result endpoints;
+- least-privilege outbound Mac/Linux worker enrollment;
+- AtlasRepo Schema launchd topology around the network-free one-shot evaluator.
 
 ## Later, only after separate approval
 
-- Scout-owned remote claim/heartbeat/result endpoints;
-- least-privilege outbound Mac worker enrollment;
-- AtlasRepo Schema optional profile;
+- production inference workload routing and server fallback policy;
 - Admin research review surfaces;
 - public Web score explanations based only on published Platform APIs.
 

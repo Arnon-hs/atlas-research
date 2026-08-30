@@ -1,6 +1,6 @@
 # Security and privacy model
 
-Status: v0.1 implementation requirements
+Status: v0.1 offline requirements plus unreleased remote-client requirements
 
 ## Trust classes
 
@@ -34,13 +34,15 @@ time and resource limits and records a bounded error after cleanup.
 
 ## Execution and environment
 
-The worker dispatches a closed in-process task enum. It uses no shell, dynamic
+The offline evaluator dispatches a closed in-process task enum. It uses no shell, dynamic
 imports, repository commands, hooks, builds, lifecycle scripts, model-selected
 files, arbitrary binaries, or artifact downloads. It rebuilds a minimal
 environment and ignores inherited credentials, `PATH`, `PYTHONPATH`, loader
 variables, `.env`, and Git configuration. v0.1 network policy is deny-by-default
 except literal loopback Ollama; redirects, remote pulls, tools, plugins, and
-arbitrary hosts/schemes are disabled.
+arbitrary hosts/schemes are disabled. The separate outer supervisor may use
+only the configured Scout HTTPS origin (or literal loopback HTTP for tests) and
+never passes its credential to the evaluator.
 
 ## Qwen boundary
 
@@ -60,7 +62,7 @@ partial writes. Exact replay returns existing bytes; key reuse with different
 bytes conflicts. A chain head must be copied to a separately protected location
 or signed before claiming detection of a full rewrite.
 
-Future Scout commits require current worker/session, attempt, fence, unexpired
+Scout terminal commits require current worker/session, attempt, fence, unexpired
 lease, uncancelled generation, and matching result digest. Heartbeat cannot
 revive an expired lease.
 
