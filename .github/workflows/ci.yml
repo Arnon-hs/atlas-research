@@ -1,16 +1,25 @@
 name: Public quality gates
+run-name: Exact revision ${{ inputs.revision || github.sha }}
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      revision:
+        description: Immutable commit SHA to verify
+        required: false
+        type: string
+
+env:
+  ATLAS_RESEARCH_REVISION: ${{ inputs.revision || github.sha }}
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ inputs.revision || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -24,6 +33,11 @@ jobs:
     steps:
       - name: Check out exact revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.ATLAS_RESEARCH_REVISION }}
+
+      - name: Verify exact revision
+        run: test "$(git rev-parse HEAD)" = "${ATLAS_RESEARCH_REVISION}"
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -56,6 +70,11 @@ jobs:
     steps:
       - name: Check out exact revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.ATLAS_RESEARCH_REVISION }}
+
+      - name: Verify exact revision
+        run: test "$(git rev-parse HEAD)" = "${ATLAS_RESEARCH_REVISION}"
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -69,7 +88,7 @@ jobs:
         run: |
           set -eu
           uv sync --locked --all-groups
-          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           first_build="$(mktemp -d "${RUNNER_TEMP:?}/atlas-build-one.XXXXXX")"
           second_build="$(mktemp -d "${RUNNER_TEMP:?}/atlas-build-two.XXXXXX")"
           trap 'rm -rf "$first_build" "$second_build"' EXIT HUP INT TERM
@@ -90,7 +109,7 @@ jobs:
 
       - name: Build and smoke-test the non-root offline image
         run: |
-          docker build --build-arg VCS_REF="${GITHUB_SHA}" -t atlas-research:ci .
+          docker build --build-arg VCS_REF="$(git rev-parse HEAD)" -t atlas-research:ci .
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --pids-limit 64 \
             atlas-research:ci --version
@@ -117,6 +136,11 @@ jobs:
     steps:
       - name: Check out exact revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.ATLAS_RESEARCH_REVISION }}
+
+      - name: Verify exact revision
+        run: test "$(git rev-parse HEAD)" = "${ATLAS_RESEARCH_REVISION}"
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

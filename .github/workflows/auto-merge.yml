@@ -77,19 +77,43 @@ jobs:
             "repos/${GH_REPO}/commits/main" --jq '.sha')"
           [[ "${main_sha}" =~ ^[0-9a-f]{40}$ ]] || exit 65
 
+          failures=0
           for workflow in ci.yml codeql.yml; do
-            matching="$(gh api \
+            expected_title="Exact revision ${main_sha}"
+            runs="$(gh api \
               -H 'Accept: application/vnd.github+json' \
               -H 'X-GitHub-Api-Version: 2022-11-28' \
-              "repos/${GH_REPO}/actions/workflows/${workflow}/runs?head_sha=${main_sha}&per_page=1" \
-              --jq '.total_count')"
-            [[ "${matching}" =~ ^[0-9]+$ ]] || exit 66
+              "repos/${GH_REPO}/actions/workflows/${workflow}/runs?event=workflow_dispatch&branch=main&per_page=100")"
 
-            if (( matching == 0 )); then
-              gh api --method POST \
-                -H 'Accept: application/vnd.github+json' \
-                -H 'X-GitHub-Api-Version: 2022-11-28' \
-                "repos/${GH_REPO}/actions/workflows/${workflow}/dispatches" \
-                -f ref=main
+            summary="$(jq -r --arg title "${expected_title}" '
+              [.workflow_runs[] | select(.display_title == $title and .head_branch == "main")] as $matching
+              | [
+                  ($matching | length),
+                  ($matching | map(select(.status != "completed" or .conclusion == "success")) | length)
+                ]
+              | @tsv
+            ' <<<"${runs}")"
+            IFS=$'\t' read -r attempts active_or_success <<<"${summary}"
+            [[ "${attempts}" =~ ^[0-9]+$ ]] || exit 66
+            [[ "${active_or_success}" =~ ^[0-9]+$ ]] || exit 67
+
+            if (( active_or_success > 0 )); then
+              continue
             fi
+
+            if (( attempts >= 3 )); then
+              echo "::error title=Exact-revision checks failed::${workflow} exhausted three attempts for ${main_sha}"
+              failures=1
+              continue
+            fi
+
+            jq -cn --arg revision "${main_sha}" \
+              '{ref: "main", inputs: {revision: $revision}}' \
+            | gh api --method POST \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "repos/${GH_REPO}/actions/workflows/${workflow}/dispatches" \
+              --input -
           done
+
+          exit "${failures}"
