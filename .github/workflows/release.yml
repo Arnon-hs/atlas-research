@@ -46,6 +46,7 @@ jobs:
         id: identity
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ADMIN_PREFLIGHT_SHA: ${{ vars.RELEASE_ADMIN_PREFLIGHT_SHA }}
         shell: bash
         run: |
           set -euo pipefail
@@ -146,17 +147,16 @@ jobs:
           fi
 
           if test "$release_state" != published_exact; then
+            if test "$RELEASE_ADMIN_PREFLIGHT_SHA" != "$GITHUB_SHA"; then
+              echo "the admin immutable-release preflight is not bound to this commit" >&2
+              exit 69
+            fi
             remote_main_sha="$(
               git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" \
                 "refs/heads/main" | awk 'NR == 1 { print $1 }'
             )"
             test "$remote_main_sha" = "${GITHUB_SHA}"
           fi
-
-          immutable_enabled="$(
-            gh api "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq '.enabled'
-          )"
-          test "$immutable_enabled" = "true"
 
           repository_lower="${GITHUB_REPOSITORY,,}"
           image_name="ghcr.io/${repository_lower}"
