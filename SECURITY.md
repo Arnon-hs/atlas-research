@@ -2,23 +2,17 @@
 
 ## Supported versions
 
-Atlas Research is an unreleased v0.1 implementation candidate. No version is a
-supported production release. Security fixes are applied to the default branch
-during candidate development. This repository must not be treated as a
-production control plane until a supported release is explicitly documented.
+Atlas Research is alpha software. Security fixes are applied to the default
+branch. After the first immutable v0.1.x GitHub Release is published, only the
+latest v0.1.x release receives best-effort security fixes; older tags and
+unreleased commits are not supported release lines. No v0.1.x release is a
+supported production control plane or a production-activation authority.
 
 ## Reporting a vulnerability
 
-GitHub private vulnerability reporting is disabled for this repository, and the
-project does not currently publish a dedicated private security contact. Do not
-publish exploit details, credentials, production data, or other sensitive
-information in a public issue.
-
-Open a minimal public issue titled `Security contact request` with no sensitive
-details and ask a maintainer to establish a private channel. This bootstrap
-request is not itself a private reporting channel. If private vulnerability
-reporting is enabled later, this document will link directly to the repository's
-advisory form.
+Use [GitHub private vulnerability reporting](https://github.com/Arnon-hs/atlas-research/security/advisories/new).
+Do not publish exploit details, credentials, production data, or other
+sensitive information in a public issue.
 
 Please include, through the private channel:
 
@@ -27,8 +21,9 @@ Please include, through the private channel:
 - minimal reproduction steps;
 - suggested remediation, if known.
 
-No response-time or disclosure-time SLA is promised before the project has a
-documented security response team.
+No response-time or disclosure-time SLA is promised. A maintainer will
+coordinate validation, remediation, and disclosure through the private
+advisory.
 
 ## Trust boundaries
 
