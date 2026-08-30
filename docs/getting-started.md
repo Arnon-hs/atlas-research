@@ -20,6 +20,104 @@ local proposal step is part of the run. It verifies the fixed loopback listener,
 the exact `qwen3:8b` tag, and its 64-character model digest; it never pulls or
 updates a model.
 
+## Verify a published release
+
+The package distribution is `atlasrepo-research`, while the import and command
+remain `atlas_research` and `atlas-research`. Releases are not published to
+PyPI. Download all assets from the immutable GitHub Release, verify their
+checksums and GitHub provenance, and install the wheel directly:
+
+```bash
+release_repo="Arnon-hs/atlas-research"
+release_tag="v0.1.0"
+release_ref="refs/tags/$release_tag"
+release_sha="$(
+  git ls-remote --tags "https://github.com/${release_repo}.git" \
+    "${release_ref}^{}" | awk 'NR == 1 { print $1 }'
+)"
+if test -z "$release_sha"; then
+  release_sha="$(
+    git ls-remote --tags "https://github.com/${release_repo}.git" \
+      "$release_ref" | awk 'NR == 1 { print $1 }'
+  )"
+fi
+[[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]
+
+release_dir="$(mktemp -d /tmp/atlas-research-release.XXXXXX)"
+gh release download "$release_tag" \
+  --repo "$release_repo" \
+  --dir "$release_dir"
+
+release_subjects=(
+  "atlasrepo_research-0.1.0-py3-none-any.whl"
+  "atlasrepo_research-0.1.0.tar.gz"
+  "atlasrepo-research-0.1.0-source.spdx.json"
+  "atlasrepo-research-0.1.0-image-digest.txt"
+)
+expected_subjects="$(printf '%s\n' "${release_subjects[@]}" | sort)"
+actual_subjects="$(awk 'NF == 2 { print $2 }' \
+  "$release_dir/SHA256SUMS" | sort)"
+test "$(wc -l < "$release_dir/SHA256SUMS" | tr -d ' ')" -eq 4
+test "$actual_subjects" = "$expected_subjects"
+(cd "$release_dir" && shasum --algorithm 256 --check SHA256SUMS)
+verify_release_attestation() {
+  local subject="$1"
+  local predicate="$2"
+  shift 2
+  gh attestation verify "$subject" \
+    "$@" \
+    --repo "$release_repo" \
+    --cert-identity "https://github.com/${release_repo}/.github/workflows/release.yml@${release_ref}" \
+    --signer-digest "$release_sha" \
+    --source-digest "$release_sha" \
+    --source-ref "$release_ref" \
+    --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+    --deny-self-hosted-runners \
+    --predicate-type "$predicate"
+}
+
+for asset_name in "${release_subjects[@]}"; do
+  verify_release_attestation \
+    "$release_dir/$asset_name" "https://slsa.dev/provenance/v1" \
+    --limit 1000
+done
+
+for package_name in \
+  "atlasrepo_research-0.1.0-py3-none-any.whl" \
+  "atlasrepo_research-0.1.0.tar.gz"
+do
+  verify_release_attestation \
+    "$release_dir/$package_name" "https://spdx.dev/Document/v2.3" \
+    --limit 1000
+done
+
+python -m pip install --no-deps \
+  "$release_dir/atlasrepo_research-0.1.0-py3-none-any.whl"
+atlas-research --version
+```
+
+The release workflow publishes no mutable `latest` tag. It records the exact
+multi-architecture image identity in the checksummed release assets. Use that
+digest, rather than resolving the version tag again, when configuring AtlasRepo
+Schema:
+
+```bash
+image="$(tr -d '\n' < \
+  "$release_dir/atlasrepo-research-0.1.0-image-digest.txt")"
+gh_user="$(gh api user --jq .login)"
+gh auth token | docker login ghcr.io --username "$gh_user" --password-stdin
+verify_release_attestation \
+  "oci://$image" "https://slsa.dev/provenance/v1" --limit 1000
+verify_release_attestation \
+  "oci://$image" "https://slsa.dev/provenance/v1" --bundle-from-oci
+docker pull "$image"
+docker buildx imagetools inspect "$image"
+```
+
+The release page also carries a source SPDX JSON SBOM. The OCI image itself has
+BuildKit provenance and SBOM attestations for both published platforms. The
+version tag is a discovery aid; the digest record is the release identity.
+
 ## Freeze a dataset
 
 The example records are synthetic and contain no production data.
@@ -86,9 +184,9 @@ validation-only offline smoke reproducible; do not reuse it for operational
 jobs. Real experiments must use short operator-selected deadlines and their own
 digest-pinned artifacts.
 
-The unreleased v0.1 candidate rejects every sealed test evaluation. No review
-metadata in a job is treated as execution authority; test evaluation remains
-fail-closed until an external operator capability is implemented.
+v0.1 rejects every sealed test evaluation. No review metadata in a job is
+treated as execution authority; test evaluation remains fail-closed until an
+external operator capability is implemented.
 
 Inside a checkout the worker verifies `HEAD` and refuses dirty source
 provenance. The container records a root-owned, non-writable two-line

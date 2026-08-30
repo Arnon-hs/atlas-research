@@ -1,6 +1,6 @@
 # Security and privacy model
 
-Status: v0.1 offline requirements plus unreleased remote-client requirements
+Status: v0.1 offline evaluator and opt-in Scout-client requirements
 
 ## Trust classes
 
@@ -56,15 +56,18 @@ multiple changes fail closed.
 ## Receipts and replay
 
 Atlas canonical JSON v1 binds exact job and input/output digests to the nested
-canonical result. Append
-locking, exclusive creation, `fsync`, atomic rename, and recovery prevent
-partial writes. Exact replay returns existing bytes; key reuse with different
-bytes conflicts. A chain head must be copied to a separately protected location
-or signed before claiming detection of a full rewrite.
+canonical result. In the offline evaluator's local receipt log, append locking,
+exclusive creation, `fsync`, atomic rename, and recovery prevent partial writes.
+Exact replay returns existing bytes; key reuse with different bytes conflicts.
+A chain head must be copied to a separately protected location or signed before
+claiming detection of a full rewrite.
 
 Scout terminal commits require current worker/session, attempt, fence, unexpired
 lease, uncancelled generation, and matching result digest. Heartbeat cannot
-revive an expired lease.
+revive an expired lease. Protocol v1 sends Scout canonical result JSON containing
+a receipt reference, but not the receipt body. Accepted-run cleanup removes the
+local run tree, so a terminal acknowledgement is not proof of durable cross-host
+receipt-body retention.
 
 ## Reports
 

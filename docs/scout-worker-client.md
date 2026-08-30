@@ -1,7 +1,7 @@
 # Scout worker client
 
-Status: experimental, disabled until the matching Scout control plane is
-reviewed and enabled.
+Status: experimental, disabled by default, and inert without explicit Scout
+feature enablement and worker enrollment.
 
 ## Ownership
 
@@ -131,6 +131,15 @@ Cleanup opens each directory relative to an already pinned parent with
 only through that opened descriptor. It does not require Linux's unavailable
 `chmod(..., follow_symlinks=False)` capability and fails closed if a directory
 cannot be opened safely.
+
+Protocol v1 sends Scout the canonical result JSON and its SHA-256; the result
+contains a receipt reference, but the completion request does not carry receipt
+content. The current Scout boundary stores the result and reference, while
+accepted-run cleanup removes the worker's local receipt body. A successful
+terminal acknowledgement therefore must not be presented as durable
+receipt-body retention. A separately reviewed export/store contract is required
+before remote results can serve as a long-lived human-review archive.
+
 After the heartbeat supervisor starts for a new claim, the worker removes every
 other direct run entry before staging; an empty claim response removes all stale
 entries. Therefore only the currently replayable claim tuple may survive an
