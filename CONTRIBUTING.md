@@ -96,3 +96,13 @@ published release's `immutable` field, exact assets, image digest, and
 attestations. An already immutable historical release uses its tag and
 attestations for read-only verification and does not depend on the current
 preflight variable or current `main`.
+
+Release recovery enumerates every Releases API page so authenticated draft
+releases are visible. It rejects duplicate exact-tag releases and pins all
+draft reads, paginated asset reads, uploads, and publication to the resolved
+release ID. If a create, upload, or publish response is interrupted after the
+server accepts it, rerun the same tag workflow: it resumes only the exact draft
+or verifies the exact immutable release instead of repeating a mutable action
+by tag. A rerun removes an interrupted upload only when the ID-scoped asset is
+an expected zero-byte `starter` with no digest; every other unexpected asset
+state fails closed.

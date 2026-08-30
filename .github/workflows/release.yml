@@ -93,37 +93,53 @@ jobs:
           fi
           test "$remote_tag_sha" = "${GITHUB_SHA}"
 
-          release_json="$(mktemp "${RUNNER_TEMP:?}/atlas-release-state.XXXXXX")"
-          release_error="$(mktemp "${RUNNER_TEMP:?}/atlas-release-error.XXXXXX")"
-          trap 'rm -f "$release_json" "$release_error"' EXIT HUP INT TERM
-          release_state=absent
-          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
-            > "$release_json" 2> "$release_error"; then
-            release_state="$(python - "$release_json" "$GITHUB_REF_NAME" "$release_notes" <<'PY'
+          release_pages="$(mktemp "${RUNNER_TEMP:?}/atlas-release-pages.XXXXXX")"
+          release_resolution="$(mktemp "${RUNNER_TEMP:?}/atlas-release-resolution.XXXXXX")"
+          trap 'rm -f "$release_pages" "$release_resolution"' EXIT HUP INT TERM
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$release_pages"
+          python - "$release_pages" "$GITHUB_REF_NAME" "$release_notes" \
+            > "$release_resolution" <<'PY'
           import json
           import pathlib
           import sys
 
-          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-          tag = sys.argv[2]
-          expected_body = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
-          common = {
-              "tag_name": tag,
-              "name": f"Atlas Research {tag}",
-              "prerelease": False,
-              "body": expected_body,
-          }
-          draft = {
-              **common,
-              "draft": True,
-              "immutable": False,
-              "published_at": None,
-          }
-          if not isinstance(release.get("id"), int) or release["id"] <= 0:
-              raise SystemExit("existing release has an invalid release id")
-          if {key: release.get(key) for key in draft} == draft:
-              print("draft")
-          else:
+          def resolve(pages: object, tag: str, expected_body: str) -> tuple[str, int | None]:
+              if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+                  raise ValueError("release pagination response is not a list of pages")
+              if any(not isinstance(release, dict) for page in pages for release in page):
+                  raise ValueError("release pagination response contains an invalid release")
+              matches = [
+                  release
+                  for page in pages
+                  for release in page
+                  if release.get("tag_name") == tag
+              ]
+              if len(matches) > 1:
+                  raise ValueError(f"multiple GitHub releases carry tag {tag!r}")
+              if not matches:
+                  return "absent", None
+
+              release = matches[0]
+              release_id = release.get("id")
+              if not isinstance(release_id, int) or isinstance(release_id, bool) or release_id <= 0:
+                  raise ValueError("existing release has an invalid release id")
+              common = {
+                  "tag_name": tag,
+                  "target_commitish": "main",
+                  "name": f"Atlas Research {tag}",
+                  "prerelease": False,
+                  "body": expected_body,
+              }
+              draft = {
+                  **common,
+                  "draft": True,
+                  "immutable": False,
+                  "published_at": None,
+              }
+              if {key: release.get(key) for key in draft} == draft:
+                  return "draft", release_id
+
               published = {
                   **common,
                   "draft": False,
@@ -132,19 +148,76 @@ jobs:
               actual = {key: release.get(key) for key in published}
               published_at = release.get("published_at")
               if actual != published or not isinstance(published_at, str) or not published_at:
-                  raise SystemExit(
+                  raise ValueError(
                       "existing release is neither the exact draft nor exact immutable publication: "
                       f"{actual!r}, published_at={published_at!r}"
                   )
-              print("published_exact")
+              return "published_exact", release_id
+
+
+          fixture_tag = "v9.8.7"
+          fixture_body = "fixture release notes\n"
+          fixture_common = {
+              "id": 987,
+              "tag_name": fixture_tag,
+              "target_commitish": "main",
+              "name": f"Atlas Research {fixture_tag}",
+              "prerelease": False,
+              "body": fixture_body,
+          }
+          fixtures = (
+              ([], ("absent", None)),
+              (
+                  [[{**fixture_common, "draft": True, "immutable": False, "published_at": None}]],
+                  ("draft", 987),
+              ),
+              (
+                  [[{**fixture_common, "draft": False, "immutable": True, "published_at": "2026-01-01T00:00:00Z"}]],
+                  ("published_exact", 987),
+              ),
+          )
+          for fixture_pages, expected in fixtures:
+              actual = resolve(fixture_pages, fixture_tag, fixture_body)
+              if actual != expected:
+                  raise SystemExit(f"release resolver fixture failed: {actual!r} != {expected!r}")
+          duplicate = {**fixture_common, "draft": True, "immutable": False, "published_at": None}
+          try:
+              resolve([[duplicate], [duplicate]], fixture_tag, fixture_body)
+          except ValueError as error:
+              if "multiple GitHub releases" not in str(error):
+                  raise
+          else:
+              raise SystemExit("release resolver accepted duplicate exact-tag releases")
+          inexact = {
+              **fixture_common,
+              "target_commitish": "not-main",
+              "draft": True,
+              "immutable": False,
+              "published_at": None,
+          }
+          try:
+              resolve([[inexact]], fixture_tag, fixture_body)
+          except ValueError as error:
+              if "neither the exact draft nor exact immutable publication" not in str(error):
+                  raise
+          else:
+              raise SystemExit("release resolver accepted inexact release metadata")
+
+          pages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          try:
+              state, release_id = resolve(
+                  pages,
+                  sys.argv[2],
+                  pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"),
+              )
+          except ValueError as error:
+              raise SystemExit(str(error)) from None
+          print(state)
+          print("" if release_id is None else release_id)
           PY
-            )"
-          elif grep -Fq '(HTTP 404)' "$release_error"; then
-            release_state=absent
-          else
-            cat "$release_error" >&2
-            exit 65
-          fi
+          test "$(awk 'END { print NR }' "$release_resolution")" -eq 2
+          release_state="$(sed -n '1p' "$release_resolution")"
+          release_id="$(sed -n '2p' "$release_resolution")"
 
           if test "$release_state" != published_exact; then
             if test "$RELEASE_ADMIN_PREFLIGHT_SHA" != "$GITHUB_SHA"; then
@@ -170,6 +243,7 @@ jobs:
             printf 'staging_ref=%s\n' "$staging_ref"
             printf 'release_notes=%s\n' "$release_notes"
             printf 'release_state=%s\n' "$release_state"
+            printf 'release_id=%s\n' "$release_id"
           } >> "$GITHUB_OUTPUT"
 
       - name: Resolve existing versioned image state
@@ -748,9 +822,11 @@ jobs:
             "https://spdx.dev/Document/v2.3"
 
       - name: Create or resume the exact draft and upload missing assets
+        id: draft_release
         if: steps.identity.outputs.release_state != 'published_exact'
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.identity.outputs.release_id }}
           RELEASE_NOTES: ${{ steps.identity.outputs.release_notes }}
           RELEASE_STATE: ${{ steps.identity.outputs.release_state }}
           VERSION: ${{ steps.identity.outputs.version }}
@@ -778,41 +854,85 @@ jobs:
           }
 
           verify_remote_identity
+          create_payload="$(mktemp "${RUNNER_TEMP:?}/atlas-create-release.XXXXXX")"
+          release_json="$(mktemp "${RUNNER_TEMP:?}/atlas-draft-release.XXXXXX")"
+          asset_pages="$(mktemp "${RUNNER_TEMP:?}/atlas-draft-assets.XXXXXX")"
+          asset_plan="$(mktemp "${RUNNER_TEMP:?}/atlas-asset-plan.XXXXXX")"
+          upload_response="$(mktemp "${RUNNER_TEMP:?}/atlas-upload-response.XXXXXX")"
+          trap 'rm -f "$create_payload" "$release_json" "$asset_pages" "$asset_plan" "$upload_response"' \
+            EXIT HUP INT TERM
+          # RELEASE_ID is an Actions step output and is intentionally empty for absent releases.
+          # shellcheck disable=SC2153
+          release_id="$RELEASE_ID"
           case "$RELEASE_STATE" in
             absent)
-              gh release create "$GITHUB_REF_NAME" \
-                --repo "$GITHUB_REPOSITORY" \
-                --verify-tag \
-                --draft \
-                --latest=false \
-                --title "Atlas Research ${GITHUB_REF_NAME}" \
-                --notes-file "$RELEASE_NOTES"
+              test -z "$release_id"
+              python - "$create_payload" "$GITHUB_REF_NAME" "$RELEASE_NOTES" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          payload = {
+              "tag_name": sys.argv[2],
+              "target_commitish": "main",
+              "name": f"Atlas Research {sys.argv[2]}",
+              "body": pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"),
+              "draft": True,
+              "prerelease": False,
+              "make_latest": "false",
+          }
+          pathlib.Path(sys.argv[1]).write_text(
+              json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+              encoding="utf-8",
+          )
+          PY
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+                --input "$create_payload" > "$release_json"
+              release_id="$(python - "$release_json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          release_id = release.get("id")
+          if not isinstance(release_id, int) or isinstance(release_id, bool) or release_id <= 0:
+              raise SystemExit("created draft has an invalid release id")
+          print(release_id)
+          PY
+              )"
               ;;
-            draft) ;;
+            draft)
+              [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+              ;;
             *) echo "invalid mutable release state from identity gate" >&2; exit 68 ;;
           esac
 
-          release_json="$(mktemp "${RUNNER_TEMP:?}/atlas-draft-assets.XXXXXX")"
-          missing_assets="$(mktemp "${RUNNER_TEMP:?}/atlas-missing-assets.XXXXXX")"
-          trap 'rm -f "$release_json" "$missing_assets"' EXIT HUP INT TERM
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+          printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
           existing_assets_verified=false
           for attempt in $(seq 1 10); do
-            gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
-              > "$release_json"
-            if python - "$release_json" dist "$GITHUB_REF_NAME" "$VERSION" "$RELEASE_NOTES" \
-              > "$missing_assets" <<'PY'
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "$release_json"
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+              > "$asset_pages"
+            if python - "$release_json" "$asset_pages" dist "$GITHUB_REF_NAME" "$VERSION" \
+              "$RELEASE_NOTES" "$release_id" > "$asset_plan" <<'PY'
           import hashlib
           import json
           import pathlib
           import sys
 
           release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-          asset_root = pathlib.Path(sys.argv[2])
-          tag = sys.argv[3]
-          version = sys.argv[4]
-          expected_body = pathlib.Path(sys.argv[5]).read_text(encoding="utf-8")
+          asset_pages = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          asset_root = pathlib.Path(sys.argv[3])
+          tag = sys.argv[4]
+          version = sys.argv[5]
+          expected_body = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
+          expected_id = int(sys.argv[7])
           expected_state = {
+              "id": expected_id,
               "tag_name": tag,
+              "target_commitish": "main",
               "name": f"Atlas Research {tag}",
               "body": expected_body,
               "draft": True,
@@ -844,19 +964,39 @@ jobs:
           if set(local) != expected_names:
               raise SystemExit(f"local release asset set is not exact: {sorted(local)!r}")
 
-          assets = release.get("assets")
-          if not isinstance(assets, list):
-              raise SystemExit("draft release assets are not a list")
+          if not isinstance(asset_pages, list) or any(not isinstance(page, list) for page in asset_pages):
+              raise SystemExit("draft release asset pagination response is invalid")
+          assets = [asset for page in asset_pages for asset in page]
+          if any(not isinstance(asset, dict) for asset in assets):
+              raise SystemExit("draft release asset pagination contains an invalid asset")
           remote_names = [asset.get("name") for asset in assets]
           if len(remote_names) != len(set(remote_names)):
               raise SystemExit("draft release contains duplicate asset names")
           extra = set(remote_names) - expected_names
           if extra:
               raise SystemExit(f"draft release contains extra assets: {sorted(extra)!r}")
+          uploaded_names = set()
+          starter_assets = []
           for asset in assets:
               name = asset["name"]
-              if asset.get("state") != "uploaded":
-                  raise SystemExit(f"draft asset {name!r} is not fully uploaded")
+              state = asset.get("state")
+              if state == "starter":
+                  asset_id = asset.get("id")
+                  if (
+                      not isinstance(asset_id, int)
+                      or isinstance(asset_id, bool)
+                      or asset_id <= 0
+                      or not isinstance(asset.get("size"), int)
+                      or isinstance(asset.get("size"), bool)
+                      or asset.get("size") != 0
+                      or asset.get("digest") is not None
+                  ):
+                      raise SystemExit(f"draft starter asset {name!r} is not safely recoverable")
+                  starter_assets.append((asset_id, name))
+                  continue
+              if state != "uploaded":
+                  raise SystemExit(f"draft asset {name!r} has invalid state {state!r}")
+              uploaded_names.add(name)
               remote_identity = (asset.get("size"), asset.get("digest"))
               if asset.get("digest") is None and asset.get("size") == local[name][0]:
                   raise SystemExit(75)
@@ -865,8 +1005,10 @@ jobs:
                       f"draft asset {name!r} mismatch: "
                       f"remote={remote_identity!r} local={local[name]!r}"
                   )
-          for name in sorted(expected_names - set(remote_names)):
-              print(asset_root / name)
+          for asset_id, name in sorted(starter_assets):
+              print("delete", asset_id, name, sep="\t")
+          for name in sorted(expected_names - uploaded_names):
+              print("upload", asset_root / name, sep="\t")
           PY
             then
               existing_assets_verified=true
@@ -881,11 +1023,118 @@ jobs:
           done
           test "$existing_assets_verified" = true
 
-          while IFS= read -r asset_path; do
-            test -n "$asset_path" || continue
-            gh release upload "$GITHUB_REF_NAME" "$asset_path" \
-              --repo "$GITHUB_REPOSITORY"
-          done < "$missing_assets"
+          while IFS=$'\t' read -r action asset_id asset_name; do
+            test "$action" = delete || continue
+            [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
+            test -f "dist/$asset_name"
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+          done < "$asset_plan"
+
+          if awk -F '\t' '$1 == "delete" { found = 1 } END { exit !found }' "$asset_plan"; then
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+              > "$asset_pages"
+            python - "$asset_pages" "$asset_plan" dist <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          pages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+              raise SystemExit("draft release asset pagination response is invalid after cleanup")
+          assets = [asset for page in pages for asset in page]
+          if any(not isinstance(asset, dict) for asset in assets):
+              raise SystemExit("draft release asset response is invalid after cleanup")
+          records = [
+              line.split("\t")
+              for line in pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
+          ]
+          if any(
+              not fields
+              or fields[0] not in {"delete", "upload"}
+              or (fields[0] == "delete" and len(fields) != 3)
+              or (fields[0] == "upload" and len(fields) != 2)
+              for fields in records
+          ):
+              raise SystemExit("release asset recovery plan is invalid")
+          cleanup = [fields for fields in records if fields[0] == "delete"]
+          cleanup_ids = {int(fields[1]) for fields in cleanup}
+          cleanup_names = {fields[2] for fields in cleanup}
+          if any(asset.get("id") in cleanup_ids or asset.get("name") in cleanup_names for asset in assets):
+              raise SystemExit("starter release asset still exists after bounded cleanup")
+          asset_root = pathlib.Path(sys.argv[3])
+          local = {
+              path.name: (
+                  path.stat().st_size,
+                  f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+              )
+              for path in sorted(asset_root.iterdir())
+              if path.is_file()
+          }
+          remote_names = [asset.get("name") for asset in assets]
+          if len(remote_names) != len(set(remote_names)) or not set(remote_names) <= set(local):
+              raise SystemExit("release assets changed during bounded cleanup")
+          upload_names = {
+              pathlib.Path(fields[1]).name
+              for fields in records
+              if fields[0] == "upload"
+          }
+          if set(remote_names) & upload_names:
+              raise SystemExit("planned release asset appeared concurrently during cleanup")
+          for asset in assets:
+              name = asset["name"]
+              if asset.get("state") != "uploaded":
+                  raise SystemExit("release asset changed state during bounded cleanup")
+              if (asset.get("size"), asset.get("digest")) != local[name]:
+                  raise SystemExit("release asset identity changed during bounded cleanup")
+          PY
+          fi
+
+          while IFS=$'\t' read -r action asset_path _; do
+            test "$action" = upload || continue
+            test -n "$asset_path"
+            asset_name="$(basename "$asset_path")"
+            encoded_name="$(python - "$asset_name" <<'PY'
+          import sys
+          import urllib.parse
+
+          print(urllib.parse.quote(sys.argv[1], safe=""))
+          PY
+            )"
+            curl --fail-with-body --silent --show-error \
+              --connect-timeout 15 \
+              --max-time 300 \
+              --request POST \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --header "Content-Type: application/octet-stream" \
+              --data-binary "@${asset_path}" \
+              --output "$upload_response" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${encoded_name}"
+            python - "$upload_response" "$asset_path" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          response = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          asset = pathlib.Path(sys.argv[2])
+          expected = {
+              "name": asset.name,
+              "state": "uploaded",
+              "size": asset.stat().st_size,
+          }
+          actual = {key: response.get(key) for key in expected}
+          if actual != expected:
+              raise SystemExit(f"uploaded release asset identity is not exact: {actual!r}")
+          expected_digest = f"sha256:{hashlib.sha256(asset.read_bytes()).hexdigest()}"
+          if response.get("digest") not in (None, expected_digest):
+              raise SystemExit("uploaded release asset digest is not exact")
+          PY
+          done < "$asset_plan"
 
       - name: Verify draft assets and publish immutably
         if: steps.identity.outputs.release_state != 'published_exact'
@@ -893,7 +1142,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           IMAGE_DIGEST: ${{ steps.image_digest.outputs.digest }}
           IMAGE_REF: ${{ steps.identity.outputs.image_ref }}
+          RELEASE_ID: ${{ steps.draft_release.outputs.release_id }}
           RELEASE_NOTES: ${{ steps.identity.outputs.release_notes }}
+          VERSION: ${{ steps.identity.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -931,25 +1182,35 @@ jobs:
           PY
           }
 
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
           release_json="$(mktemp "${RUNNER_TEMP:?}/atlas-release.XXXXXX")"
+          asset_pages="$(mktemp "${RUNNER_TEMP:?}/atlas-release-assets.XXXXXX")"
           image_manifest="$(mktemp "${RUNNER_TEMP:?}/atlas-release-image.XXXXXX")"
-          trap 'rm -f "$release_json" "$image_manifest"' EXIT HUP INT TERM
+          trap 'rm -f "$release_json" "$asset_pages" "$image_manifest"' EXIT HUP INT TERM
           assets_verified=false
           for attempt in $(seq 1 10); do
-            gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
-              > "$release_json"
-            if python - "$release_json" dist "$GITHUB_REF_NAME" "$RELEASE_NOTES" <<'PY'
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" > "$release_json"
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+              > "$asset_pages"
+            if python - "$release_json" "$asset_pages" dist "$GITHUB_REF_NAME" "$VERSION" \
+              "$RELEASE_NOTES" "$RELEASE_ID" <<'PY'
           import hashlib
           import json
           import pathlib
           import sys
 
           release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-          asset_root = pathlib.Path(sys.argv[2])
-          tag = sys.argv[3]
-          expected_body = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
+          asset_pages = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          asset_root = pathlib.Path(sys.argv[3])
+          tag = sys.argv[4]
+          version = sys.argv[5]
+          expected_body = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
+          expected_id = int(sys.argv[7])
           expected_state = {
+              "id": expected_id,
               "tag_name": tag,
+              "target_commitish": "main",
               "name": f"Atlas Research {tag}",
               "body": expected_body,
               "draft": True,
@@ -961,13 +1222,31 @@ jobs:
           if actual_state != expected_state:
               raise SystemExit(f"release is not the exact draft before publish: {actual_state!r}")
 
-          local = {}
-          for path in sorted(asset_root.iterdir()):
-              if path.is_file():
-                  local[path.name] = (path.stat().st_size, f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}")
-          assets = release.get("assets")
-          if not isinstance(assets, list):
-              raise SystemExit("draft release assets are not a list")
+          expected_names = {
+              "SHA256SUMS",
+              f"atlasrepo-research-{version}-image-digest.txt",
+              f"atlasrepo-research-{version}-source.spdx.json",
+              f"atlasrepo_research-{version}-py3-none-any.whl",
+              f"atlasrepo_research-{version}.tar.gz",
+          }
+          entries = sorted(asset_root.iterdir())
+          if any(not path.is_file() for path in entries):
+              raise SystemExit("dist contains a non-file entry")
+          local = {
+              path.name: (
+                  path.stat().st_size,
+                  f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+              )
+              for path in entries
+          }
+          if set(local) != expected_names:
+              raise SystemExit(f"local release asset set is not exact: {sorted(local)!r}")
+
+          if not isinstance(asset_pages, list) or any(not isinstance(page, list) for page in asset_pages):
+              raise SystemExit("draft release asset pagination response is invalid")
+          assets = [asset for page in asset_pages for asset in page]
+          if any(not isinstance(asset, dict) for asset in assets):
+              raise SystemExit("draft release asset pagination contains an invalid asset")
           remote_names = [asset.get("name") for asset in assets]
           if len(remote_names) != len(set(remote_names)):
               raise SystemExit("draft release contains duplicate asset names")
@@ -997,28 +1276,35 @@ jobs:
 
           verify_remote_identity
           verify_image_tag
-          gh release edit "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --draft=false \
-            --latest=false
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false \
+            -f make_latest=false > "$release_json"
           verify_remote_identity
           verify_image_tag
 
-          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
-            > "$release_json"
-          python - "$release_json" dist "$GITHUB_REF_NAME" "$RELEASE_NOTES" <<'PY'
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" > "$release_json"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+            > "$asset_pages"
+          python - "$release_json" "$asset_pages" dist "$GITHUB_REF_NAME" "$VERSION" \
+            "$RELEASE_NOTES" "$RELEASE_ID" <<'PY'
           import hashlib
           import json
           import pathlib
           import sys
 
           release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-          asset_root = pathlib.Path(sys.argv[2])
-          tag = sys.argv[3]
-          expected_body = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
+          asset_pages = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          asset_root = pathlib.Path(sys.argv[3])
+          tag = sys.argv[4]
+          version = sys.argv[5]
+          expected_body = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
+          expected_id = int(sys.argv[7])
           expected = {
+              "id": expected_id,
               "tag_name": tag,
+              "target_commitish": "main",
               "name": f"Atlas Research {tag}",
               "body": expected_body,
               "draft": False,
@@ -1031,17 +1317,32 @@ jobs:
           published_at = release.get("published_at")
           if not isinstance(published_at, str) or not published_at:
               raise SystemExit("published release has no publication timestamp")
+
+          expected_names = {
+              "SHA256SUMS",
+              f"atlasrepo-research-{version}-image-digest.txt",
+              f"atlasrepo-research-{version}-source.spdx.json",
+              f"atlasrepo_research-{version}-py3-none-any.whl",
+              f"atlasrepo_research-{version}.tar.gz",
+          }
+          entries = sorted(asset_root.iterdir())
+          if any(not path.is_file() for path in entries):
+              raise SystemExit("dist contains a non-file entry")
           local = {
               path.name: (
                   path.stat().st_size,
                   f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
               )
-              for path in sorted(asset_root.iterdir())
-              if path.is_file()
+              for path in entries
           }
-          assets = release.get("assets")
-          if not isinstance(assets, list):
-              raise SystemExit("published release assets are not a list")
+          if set(local) != expected_names:
+              raise SystemExit(f"local release asset set is not exact: {sorted(local)!r}")
+
+          if not isinstance(asset_pages, list) or any(not isinstance(page, list) for page in asset_pages):
+              raise SystemExit("published release asset pagination response is invalid")
+          assets = [asset for page in asset_pages for asset in page]
+          if any(not isinstance(asset, dict) for asset in assets):
+              raise SystemExit("published release asset pagination contains an invalid asset")
           remote_names = [asset.get("name") for asset in assets]
           if len(remote_names) != len(set(remote_names)):
               raise SystemExit("published release contains duplicate asset names")
@@ -1061,6 +1362,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           IMAGE_DIGEST: ${{ steps.image_digest.outputs.digest }}
           IMAGE_REF: ${{ steps.identity.outputs.image_ref }}
+          RELEASE_ID: ${{ steps.identity.outputs.release_id }}
           RELEASE_NOTES: ${{ steps.identity.outputs.release_notes }}
           VERSION: ${{ steps.identity.outputs.version }}
         shell: bash
@@ -1095,26 +1397,35 @@ jobs:
           PY
           }
 
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
           release_json="$(mktemp "${RUNNER_TEMP:?}/atlas-published-release.XXXXXX")"
+          asset_pages="$(mktemp "${RUNNER_TEMP:?}/atlas-published-assets.XXXXXX")"
           image_manifest="$(mktemp "${RUNNER_TEMP:?}/atlas-published-image.XXXXXX")"
-          trap 'rm -f "$release_json" "$image_manifest"' EXIT HUP INT TERM
+          trap 'rm -f "$release_json" "$asset_pages" "$image_manifest"' EXIT HUP INT TERM
           verify_remote_tag
           verify_image_tag
-          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
-            > "$release_json"
-          python - "$release_json" dist "$GITHUB_REF_NAME" "$VERSION" "$RELEASE_NOTES" <<'PY'
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" > "$release_json"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+            > "$asset_pages"
+          python - "$release_json" "$asset_pages" dist "$GITHUB_REF_NAME" "$VERSION" \
+            "$RELEASE_NOTES" "$RELEASE_ID" <<'PY'
           import hashlib
           import json
           import pathlib
           import sys
 
           release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-          asset_root = pathlib.Path(sys.argv[2])
-          tag = sys.argv[3]
-          version = sys.argv[4]
-          expected_body = pathlib.Path(sys.argv[5]).read_text(encoding="utf-8")
+          asset_pages = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          asset_root = pathlib.Path(sys.argv[3])
+          tag = sys.argv[4]
+          version = sys.argv[5]
+          expected_body = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
+          expected_id = int(sys.argv[7])
           expected_state = {
+              "id": expected_id,
               "tag_name": tag,
+              "target_commitish": "main",
               "name": f"Atlas Research {tag}",
               "body": expected_body,
               "draft": False,
@@ -1124,8 +1435,6 @@ jobs:
           actual_state = {key: release.get(key) for key in expected_state}
           if actual_state != expected_state:
               raise SystemExit(f"immutable release metadata is not exact: {actual_state!r}")
-          if not isinstance(release.get("id"), int) or release["id"] <= 0:
-              raise SystemExit("immutable release has an invalid release id")
           published_at = release.get("published_at")
           if not isinstance(published_at, str) or not published_at:
               raise SystemExit("immutable release has no publication timestamp")
@@ -1150,9 +1459,11 @@ jobs:
           if set(local) != expected_names:
               raise SystemExit(f"local release asset set is not exact: {sorted(local)!r}")
 
-          assets = release.get("assets")
-          if not isinstance(assets, list):
-              raise SystemExit("immutable release assets are not a list")
+          if not isinstance(asset_pages, list) or any(not isinstance(page, list) for page in asset_pages):
+              raise SystemExit("immutable release asset pagination response is invalid")
+          assets = [asset for page in asset_pages for asset in page]
+          if any(not isinstance(asset, dict) for asset in assets):
+              raise SystemExit("immutable release asset pagination contains an invalid asset")
           remote_names = [asset.get("name") for asset in assets]
           if len(remote_names) != len(set(remote_names)):
               raise SystemExit("immutable release contains duplicate asset names")
