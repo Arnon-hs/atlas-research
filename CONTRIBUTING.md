@@ -67,3 +67,32 @@ accepting a change.
 Use a concise imperative pull-request title such as `fix: enforce workspace
 budget`. Sign each commit with `git commit -s`; cryptographic signing is welcome
 but is not currently required by project policy.
+
+## Maintainer release preflight
+
+The repository's immutable-release setting is exposed through an admin-only
+endpoint that the short-lived Actions token cannot read. Before creating a
+release tag, a repository administrator must verify the setting with their own
+authenticated GitHub CLI session and bind the exact reviewed `main` commit to
+the non-secret Actions variable consumed by the tagged workflow:
+
+```bash
+release_repo="Arnon-hs/atlas-research"
+release_sha="$(git ls-remote \
+  "https://github.com/${release_repo}.git" refs/heads/main | \
+  awk 'NR == 1 { print $1 }')"
+[[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]
+test "$(gh api "repos/${release_repo}/immutable-releases" --jq .enabled)" = true
+gh variable set RELEASE_ADMIN_PREFLIGHT_SHA \
+  --repo "$release_repo" \
+  --body "$release_sha"
+```
+
+Create the annotated release tag only after the release pull request and the
+post-merge quality and CodeQL runs are green on that same SHA. The workflow
+rejects an absent or draft release unless `RELEASE_ADMIN_PREFLIGHT_SHA`, the
+peeled tag, and current `main` all equal the tagged commit. It also verifies the
+published release's `immutable` field, exact assets, image digest, and
+attestations. An already immutable historical release uses its tag and
+attestations for read-only verification and does not depend on the current
+preflight variable or current `main`.
