@@ -979,7 +979,13 @@ def _result_document(
     return result
 
 
-def _validate_result_document(document: Mapping[str, object], job: ResearchJob) -> None:
+def validate_result_document(
+    document: Mapping[str, object],
+    job: ResearchJob,
+    *,
+    expected_worker_id: str | None = None,
+    expected_session_id: str | None = None,
+) -> None:
     required = {
         "schema_version",
         "task",
@@ -1032,9 +1038,13 @@ def _validate_result_document(document: Mapping[str, object], job: ResearchJob) 
         or not isinstance(session_id, str)
         or _IDENTIFIER.fullmatch(session_id) is None
         or not isinstance(version, str)
-        or not 1 <= len(version) <= 64
+        or not 1 <= len(version.encode("utf-8")) <= 64
     ):
         raise ConflictError("RESULT_CONFLICT", "Existing result worker is invalid")
+    if (expected_worker_id is not None and worker_id != expected_worker_id) or (
+        expected_session_id is not None and session_id != expected_session_id
+    ):
+        raise ConflictError("RESULT_CONFLICT", "Existing result worker does not match")
     artifacts = document.get("artifacts")
     if not isinstance(artifacts, list) or len(artifacts) > 64:
         raise ConflictError("RESULT_CONFLICT", "Existing result artifacts are invalid")
@@ -1315,7 +1325,7 @@ def run_isolated_job(
         prior_result = _read_existing_result(private_root, result_uri)
         if prior_result is not None:
             path, document = prior_result
-            _validate_result_document(document, job)
+            validate_result_document(document, job)
             if document.get("status") == "completed":
                 receipt_log = ReceiptLog(private_root / receipt_dir)
                 committed = receipt_log.find(job.idempotency_key, job.spec_sha256)

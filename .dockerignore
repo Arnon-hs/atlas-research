@@ -1,4 +1,4 @@
 **
 !Dockerfile
 !dist/
-!dist/atlas_research-*.whl
+!dist/atlasrepo_research-*.whl

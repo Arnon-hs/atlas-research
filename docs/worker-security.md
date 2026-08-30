@@ -69,6 +69,35 @@ The recommended hostile-input boundary is a non-root container with no network,
 no capabilities, a read-only root filesystem, a PID limit, explicit CPU/memory
 limits, read-only input, and a single private output mount.
 
+## Remote supervisor boundary
+
+The optional remote client is an outer supervisor, not part of the evaluator.
+It is single-concurrency and initiates outbound HTTPS only. Loopback HTTP is
+accepted solely for local integration tests. The enrollment credential and
+private config must be regular, single-link files with no group or world access;
+the short-lived session token is held only in memory and is never written to the
+status file or passed to the evaluator.
+
+Scout may send only a closed research job envelope and relative object paths
+under its worker API. The client rejects redirects, absolute or cross-origin
+URLs, compression, missing or mismatched content lengths, archive paths,
+traversal, duplicate paths, digest drift, size drift, more than 64 objects, and
+bundles above the operator ceiling. Downloaded inputs are sealed read-only
+before the local executor starts.
+
+The executable path is selected in the operator-owned config, must be an
+absolute non-symlink regular file owned by root or the current user, and cannot
+be group/world writable. No response from Scout can replace it or add command
+arguments. The supervisor passes only fixed identifiers and paths, starts a new
+process group, renews the lease, honors cancellation, enforces a wall deadline,
+and sends only canonical result JSON plus its SHA-256. Scout remains responsible
+for rejecting stale attempts, fences, cancellation generations, expired leases,
+and conflicting terminal digests.
+
+The preferred executor is AtlasRepo Schema's digest-pinned one-shot container:
+the supervisor has network access, while the evaluator keeps `network none`, a
+read-only root filesystem, no capabilities, and no controller credential.
+
 ## Qwen boundary
 
 Qwen proposal generation is deliberately outside the offline evaluator
