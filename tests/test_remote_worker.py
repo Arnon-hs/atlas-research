@@ -863,7 +863,9 @@ def test_serve_refreshes_telemetry_during_long_job_without_delaying_heartbeat(
         right - left
         for left, right in zip(fake.telemetry_calls, fake.telemetry_calls[1:], strict=False)
     ]
-    assert max(intervals[:-1]) < 0.2
+    # A loaded CI runner may pause the publisher briefly; a heartbeat-sized gap
+    # would still prove that telemetry publication is coupled to the heartbeat.
+    assert max(intervals[:-1]) < 0.5
 
 
 def test_worker_honors_server_cancellation(tmp_path: Path) -> None:

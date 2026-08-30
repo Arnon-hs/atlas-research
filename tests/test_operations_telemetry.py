@@ -124,7 +124,7 @@ def test_scout_telemetry_rejects_bad_timestamps_and_clock_drift() -> None:
 
     non_minute = _response(now)
     cast(list[dict[str, object]], non_minute["history"])[-1]["at"] = _timestamp(
-        now.replace(microsecond=0)
+        now.replace(second=1, microsecond=0)
     )
     with pytest.raises(ValidationError, match="history timestamp"):
         parse_scout_telemetry(non_minute, now=now)
