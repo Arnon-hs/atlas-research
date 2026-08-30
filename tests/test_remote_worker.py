@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import shutil
+import socket
+import ssl
 import stat
 import threading
 import time
@@ -17,9 +19,15 @@ from typing import Any, ClassVar, cast
 
 import pytest
 
+import atlas_research.remote_worker as remote_worker_module
 from atlas_research.canonical import canonical_json_bytes, canonical_sha256, strict_json_loads
 from atlas_research.constants import MAX_ARTIFACT_BYTES, MAX_TOTAL_INPUT_BYTES, SCHEMA_VERSION
 from atlas_research.errors import ResourceLimitError, ValidationError
+from atlas_research.operations_telemetry import (
+    ScoutTelemetry,
+    TelemetryCommitAmbiguousError,
+    parse_scout_telemetry,
+)
 from atlas_research.remote_worker import (
     PROTOCOL_VERSION,
     HeartbeatReply,
@@ -32,8 +40,11 @@ from atlas_research.remote_worker import (
     WorkerSession,
     _claim_from_mapping,
     _controller_origin,
+    _duplicate_interrupt_socket,
     _read_secret_file,
+    _resolved_addresses,
     _session_from_mapping,
+    _TelemetryPublisher,
     load_worker_config,
 )
 
@@ -52,6 +63,42 @@ def _future(seconds: int = 600) -> datetime:
 
 def _timestamp(value: datetime | None = None) -> str:
     return (value or _future()).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _telemetry_timestamp(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _scout_telemetry(
+    value: datetime | None = None,
+    *,
+    pending: int = 7,
+    in_flight: int = 1,
+    queue_failed: int = 2,
+    processed: int = 3,
+    failed: int = 1,
+) -> ScoutTelemetry:
+    collected_at = (value or datetime.now(UTC)).replace(microsecond=123_000)
+    minute = collected_at.replace(second=0, microsecond=0)
+    history: list[dict[str, object]] = []
+    if processed or failed:
+        history.append(
+            {"at": _telemetry_timestamp(minute), "processed": processed, "failed": failed}
+        )
+    return parse_scout_telemetry(
+        {
+            "protocol_version": PROTOCOL_VERSION,
+            "collected_at": _telemetry_timestamp(collected_at),
+            "queue": {
+                "pending": pending,
+                "in_flight": in_flight,
+                "failed": queue_failed,
+            },
+            "totals": {"processed": processed, "failed": failed},
+            "history": history,
+        },
+        now=datetime.now(UTC),
+    )
 
 
 def _write_private(path: Path, data: str, mode: int = 0o600) -> Path:
@@ -125,25 +172,31 @@ def _executor(
     return path
 
 
-def _config(tmp_path: Path, *, executor: Path | None = None) -> WorkerConfig:
+def _config(
+    tmp_path: Path,
+    *,
+    executor: Path | None = None,
+    telemetry: bool = False,
+) -> WorkerConfig:
     token = _write_private(tmp_path / "enrollment.token", f"{ENROLLMENT_TOKEN}\n")
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
     executable = executor or _executor(tmp_path / "executor")
-    return WorkerConfig.from_mapping(
-        {
-            "protocol_version": PROTOCOL_VERSION,
-            "controller_url": "http://127.0.0.1:8123",
-            "worker_id": "mac-mini-test",
-            "enrollment_token_file": str(token),
-            "state_root": str(state),
-            "executor_path": str(executable),
-            "poll_seconds": 0.1,
-            "request_timeout_seconds": 2,
-            "max_job_seconds": 10,
-            "max_bundle_bytes": 1 << 20,
-        }
-    )
+    mapping: dict[str, object] = {
+        "protocol_version": PROTOCOL_VERSION,
+        "controller_url": "http://127.0.0.1:8123",
+        "worker_id": "mac-mini-test",
+        "enrollment_token_file": str(token),
+        "state_root": str(state),
+        "executor_path": str(executable),
+        "poll_seconds": 0.1,
+        "request_timeout_seconds": 2,
+        "max_job_seconds": 10,
+        "max_bundle_bytes": 1 << 20,
+    }
+    if telemetry:
+        mapping["telemetry_file"] = str(state / "worker-telemetry.json")
+    return WorkerConfig.from_mapping(mapping)
 
 
 def _artifact(
@@ -229,15 +282,42 @@ class FakeClient:
         self.failed: list[tuple[str, str, bool]] = []
         self.heartbeats: list[int] = []
         self.claim_calls = 0
+        self.claim_error: RemoteWorkerError | None = None
+        self.telemetry_error: Exception | None = None
+        self.telemetry_responses: list[ScoutTelemetry] = []
+        self.telemetry_delay = 0.0
+        self.telemetry_calls: list[float] = []
 
     def exchange_session(self) -> WorkerSession:
         return self.session
 
     def claim(self, _session_value: WorkerSession) -> RemoteClaim | None:
         self.claim_calls += 1
+        if self.claim_error is not None:
+            raise self.claim_error
         claim = self.next_claim
         self.next_claim = None
         return claim
+
+    def telemetry(
+        self,
+        _session_value: WorkerSession,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> ScoutTelemetry:
+        self.telemetry_calls.append(time.monotonic())
+        if self.telemetry_delay:
+            if cancel_event is None:
+                time.sleep(self.telemetry_delay)
+            elif cancel_event.wait(self.telemetry_delay):
+                raise RemoteWorkerError(
+                    "WORKER_CONTROLLER_UNAVAILABLE", "Fixture telemetry was cancelled"
+                )
+        if self.telemetry_error is not None:
+            raise self.telemetry_error
+        if self.telemetry_responses:
+            return self.telemetry_responses.pop(0)
+        return _scout_telemetry()
 
     def download(self, _session_value: WorkerSession, artifact: RemoteArtifact) -> bytes:
         if self.download_hook is not None:
@@ -307,6 +387,31 @@ def test_config_requires_secure_local_paths_and_tls_or_loopback(tmp_path: Path) 
     config.enrollment_token_file.chmod(0o644)
     with pytest.raises(ValidationError, match="unsafe"):
         _read_secret_file(config.enrollment_token_file)
+
+
+def test_config_accepts_only_safe_absolute_optional_telemetry_file(tmp_path: Path) -> None:
+    config = _config(tmp_path, telemetry=True)
+    assert config.telemetry_file == config.state_root / "worker-telemetry.json"
+    mapping: dict[str, object] = {
+        "protocol_version": PROTOCOL_VERSION,
+        "controller_url": config.controller_url,
+        "worker_id": config.worker_id,
+        "enrollment_token_file": str(config.enrollment_token_file),
+        "state_root": str(config.state_root),
+        "executor_path": str(config.executor_path),
+        "telemetry_file": "relative/worker-telemetry.json",
+    }
+    with pytest.raises(ValidationError, match="absolute"):
+        WorkerConfig.from_mapping(mapping)
+
+    outside = tmp_path / "outside.json"
+    outside.write_text("preserve", encoding="utf-8")
+    outside.chmod(0o600)
+    linked = config.state_root / "linked-telemetry.json"
+    linked.symlink_to(outside)
+    mapping["telemetry_file"] = str(linked)
+    with pytest.raises(ValidationError, match="unsafe"):
+        WorkerConfig.from_mapping(mapping)
 
 
 def test_load_config_rejects_group_readable_config(tmp_path: Path) -> None:
@@ -501,6 +606,264 @@ def test_worker_stages_executes_completes_and_cleans_confirmed_run(tmp_path: Pat
     status = json.loads((config.state_root / "status.json").read_text(encoding="utf-8"))
     assert status["state"] == "completed"
     assert SESSION_TOKEN not in json.dumps(status)
+
+
+def test_one_shot_publishes_scout_truth_without_fake_zeroes(tmp_path: Path) -> None:
+    config = _config(tmp_path, telemetry=True)
+    fake = FakeClient(None, {})
+
+    outcome = RemoteWorker(config, cast(ScoutWorkerClient, fake)).run_once()
+
+    assert outcome.state == "idle"
+    assert len(fake.telemetry_calls) == 1
+    telemetry = json.loads(cast(Path, config.telemetry_file).read_text(encoding="utf-8"))
+    assert telemetry["schema_version"] == 1
+    assert telemetry["worker_id"] == "atlasrepo"
+    assert telemetry["state"] == "idle"
+    assert telemetry["queue"] == {"pending": 7, "in_flight": 1, "failed": 2}
+    assert telemetry["totals"] == {"processed": 3, "failed": 1}
+    assert telemetry["active_model"] is None
+    assert telemetry["history"][-1]["processed"] == 3
+
+
+def test_controller_failure_projects_degraded_only_after_fresh_scout_truth(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, telemetry=True)
+    fake = FakeClient(None, {})
+    fake.claim_error = RemoteWorkerError(
+        "WORKER_CONTROLLER_RETRY", "Fixture controller unavailable"
+    )
+    worker = RemoteWorker(config, cast(ScoutWorkerClient, fake))
+
+    with pytest.raises(RemoteWorkerError, match="controller unavailable"):
+        worker.run_once()
+
+    telemetry = json.loads(cast(Path, config.telemetry_file).read_text(encoding="utf-8"))
+    assert telemetry["state"] == "degraded"
+    assert telemetry["queue"]["pending"] == 7
+
+
+def test_terminal_job_failure_returns_worker_to_idle(tmp_path: Path) -> None:
+    job = _fixture_job()
+    artifact, job = _artifact("job.json", job)
+    fake = FakeClient(_claim((artifact,)), {"job.json": job})
+    config = _config(tmp_path, telemetry=True)
+
+    outcome = RemoteWorker(config, cast(ScoutWorkerClient, fake)).run_once()
+
+    assert outcome.state == "failed"
+    assert fake.failed == [("atlas-research-fixture-v1-job", "RESULT_MISSING", False)]
+    telemetry = json.loads(cast(Path, config.telemetry_file).read_text(encoding="utf-8"))
+    assert telemetry["state"] == "idle"
+
+
+@pytest.mark.parametrize(
+    "telemetry_error",
+    [
+        RemoteWorkerError("WORKER_CONTROLLER_RETRY", "Fixture telemetry unavailable"),
+        ValidationError("WORKER_TELEMETRY_INVALID", "Fixture telemetry response invalid"),
+    ],
+)
+def test_failed_telemetry_fetch_or_validation_never_refreshes_existing_projection(
+    tmp_path: Path, telemetry_error: Exception
+) -> None:
+    config = _config(tmp_path, telemetry=True)
+    fake = FakeClient(None, {})
+    worker = RemoteWorker(config, cast(ScoutWorkerClient, fake))
+    assert worker.run_once().state == "idle"
+    destination = cast(Path, config.telemetry_file)
+    original = destination.read_bytes()
+    original_mtime = destination.stat().st_mtime_ns
+    fake.telemetry_error = telemetry_error
+
+    assert worker.run_once().state == "idle"
+
+    assert destination.read_bytes() == original
+    assert destination.stat().st_mtime_ns == original_mtime
+
+
+def test_older_scout_snapshot_cannot_overwrite_newer_projection(tmp_path: Path) -> None:
+    config = _config(tmp_path, telemetry=True)
+    fake = FakeClient(None, {})
+    now = datetime.now(UTC).replace(microsecond=123_000)
+    fake.telemetry_responses = [
+        _scout_telemetry(now, pending=9),
+        _scout_telemetry(now - timedelta(seconds=1), pending=1),
+    ]
+    worker = RemoteWorker(config, cast(ScoutWorkerClient, fake))
+    assert worker.run_once().state == "idle"
+    destination = cast(Path, config.telemetry_file)
+    first = destination.read_bytes()
+
+    assert worker.run_once().state == "idle"
+
+    assert destination.read_bytes() == first
+    assert json.loads(first)["queue"]["pending"] == 9
+
+
+def test_post_rename_ambiguity_advances_watermark_and_prevents_visible_regression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, telemetry=True)
+    fake = FakeClient(None, {})
+    now = datetime.now(UTC).replace(microsecond=123_000)
+    fake.telemetry_responses = [
+        _scout_telemetry(now, pending=9),
+        _scout_telemetry(now - timedelta(seconds=1), pending=1),
+    ]
+    worker = RemoteWorker(config, cast(ScoutWorkerClient, fake))
+    worker._session = _session()
+    real_write = remote_worker_module.write_worker_telemetry
+    writes = 0
+
+    def ambiguous_write(
+        path: Path,
+        value: Mapping[str, object],
+        *,
+        watermark: datetime,
+    ) -> None:
+        nonlocal writes
+        writes += 1
+        real_write(path, value, watermark=watermark)
+        raise TelemetryCommitAmbiguousError(watermark)
+
+    monkeypatch.setattr(remote_worker_module, "write_worker_telemetry", ambiguous_write)
+
+    assert worker._publish_telemetry_once() is False
+    destination = cast(Path, config.telemetry_file)
+    visible = destination.read_bytes()
+    assert json.loads(visible)["queue"]["pending"] == 9
+    assert worker._last_telemetry_at == now
+
+    assert worker._publish_telemetry_once() is False
+    assert destination.read_bytes() == visible
+    assert writes == 1
+
+
+def test_restart_cannot_regress_persisted_future_telemetry_watermark(tmp_path: Path) -> None:
+    config = _config(tmp_path, telemetry=True)
+    now = datetime.now(UTC).replace(microsecond=123_000)
+    future = now + timedelta(seconds=29)
+    first_client = FakeClient(None, {})
+    first_client.telemetry_responses = [_scout_telemetry(future, pending=9)]
+    first_worker = RemoteWorker(config, cast(ScoutWorkerClient, first_client))
+    first_worker._session = _session()
+    assert first_worker._publish_telemetry_once() is True
+    destination = cast(Path, config.telemetry_file)
+    visible = destination.read_bytes()
+
+    restarted_client = FakeClient(None, {})
+    restarted_client.telemetry_responses = [_scout_telemetry(now, pending=1)]
+    restarted_worker = RemoteWorker(config, cast(ScoutWorkerClient, restarted_client))
+    restarted_worker._session = _session()
+
+    assert restarted_worker._publish_telemetry_once() is False
+    assert destination.read_bytes() == visible
+    assert restarted_worker._last_telemetry_at == future
+
+
+def test_telemetry_publication_is_serialized(tmp_path: Path) -> None:
+    config = _config(tmp_path, telemetry=True)
+    fake = FakeClient(None, {})
+    fake.telemetry_delay = 0.05
+    worker = RemoteWorker(config, cast(ScoutWorkerClient, fake))
+    worker._session = _session()
+    active = 0
+    maximum_active = 0
+    guard = threading.Lock()
+    original = fake.telemetry
+
+    def observed(
+        session: WorkerSession,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> ScoutTelemetry:
+        nonlocal active, maximum_active
+        with guard:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        try:
+            return original(session, cancel_event=cancel_event)
+        finally:
+            with guard:
+                active -= 1
+
+    fake.telemetry = observed  # type: ignore[method-assign]
+    threads = [threading.Thread(target=worker._publish_telemetry_once) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert maximum_active == 1
+    assert len(fake.telemetry_calls) == 2
+
+
+def test_telemetry_failure_never_changes_successful_terminal_path(tmp_path: Path) -> None:
+    job = _fixture_job()
+    artifact, job = _artifact("job.json", job)
+    fake = FakeClient(_claim((artifact,)), {"job.json": job})
+    fake.telemetry_error = RuntimeError("fixture publisher failure")
+    config = _config(
+        tmp_path,
+        executor=_executor(tmp_path / "executor", result=_fixture_result(job)),
+        telemetry=True,
+    )
+
+    outcome = RemoteWorker(config, cast(ScoutWorkerClient, fake)).run_once()
+
+    assert outcome.state == "completed"
+    assert len(fake.completed) == 1
+    assert not cast(Path, config.telemetry_file).exists()
+
+
+def test_serve_refreshes_telemetry_during_long_job_without_delaying_heartbeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(remote_worker_module, "_TELEMETRY_PUBLISH_INTERVAL_SECONDS", 0.05)
+    job = _fixture_job()
+    artifact, job = _artifact("job.json", job)
+    fake = FakeClient(
+        _claim((artifact,)),
+        {"job.json": job},
+        session=_session(heartbeat_interval_seconds=1),
+    )
+    fake.telemetry_delay = 0.01
+    config = _config(
+        tmp_path,
+        executor=_executor(tmp_path / "executor", result=_fixture_result(job), sleep=1.15),
+        telemetry=True,
+    )
+    worker = RemoteWorker(config, cast(ScoutWorkerClient, fake))
+    fake.complete_hook = worker.stop_event.set
+    states: list[str] = []
+    real_write = remote_worker_module.write_worker_telemetry
+
+    def record_write(
+        path: Path,
+        value: Mapping[str, object],
+        *,
+        watermark: datetime,
+    ) -> None:
+        states.append(cast(str, value["state"]))
+        real_write(path, value, watermark=watermark)
+
+    monkeypatch.setattr(remote_worker_module, "write_worker_telemetry", record_write)
+
+    outcome = worker.serve()
+
+    assert outcome.state == "completed"
+    assert "running" in states
+    assert states[-1] == "offline"
+    assert len(fake.telemetry_calls) >= 10
+    assert fake.heartbeats[:2] == [1, 2]
+    intervals = [
+        right - left
+        for left, right in zip(fake.telemetry_calls, fake.telemetry_calls[1:], strict=False)
+    ]
+    assert max(intervals[:-1]) < 0.2
 
 
 def test_worker_honors_server_cancellation(tmp_path: Path) -> None:
@@ -1243,6 +1606,7 @@ class _ProtocolHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Encoding", "identity")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         if body:
             self.wfile.write(body)
@@ -1269,6 +1633,25 @@ class _ProtocolHandler(BaseHTTPRequestHandler):
                 self._send(204)
             else:
                 self._send(200, self.claim_response)
+        elif self.path == "/api/worker/v1/telemetry":
+            now = datetime.now(UTC).replace(microsecond=123_000)
+            self._send(
+                200,
+                {
+                    "protocol_version": PROTOCOL_VERSION,
+                    "collected_at": _telemetry_timestamp(now),
+                    "queue": {"pending": 7, "in_flight": 1, "failed": 2},
+                    "totals": {"processed": 3, "failed": 1},
+                    "history": [
+                        {
+                            "at": _telemetry_timestamp(now.replace(second=0, microsecond=0)),
+                            "processed": 3,
+                            "failed": 1,
+                        }
+                    ],
+                },
+                content_type="application/json; charset=utf-8",
+            )
         elif self.path == "/api/worker/v1/heartbeat":
             self._send(200, {"cancelled": False, "lease_expires_at": _timestamp()})
         elif self.path in {"/api/worker/v1/complete", "/api/worker/v1/fail"}:
@@ -1298,6 +1681,464 @@ class _ProtocolHandler(BaseHTTPRequestHandler):
         )
         self.end_headers()
         self.wfile.write(self.artifact)
+
+
+class _SlowTelemetryHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    started = threading.Event()
+    finished = threading.Event()
+    delay_seconds: ClassVar[float] = 0.02
+    stall_after_first_seconds: ClassVar[float] = 0.0
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length:
+            self.rfile.read(length)
+        now = datetime.now(UTC).replace(microsecond=123_000)
+        body = canonical_json_bytes(
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "collected_at": _telemetry_timestamp(now),
+                "queue": {"pending": 0, "in_flight": 0, "failed": 0},
+                "totals": {"processed": 0, "failed": 0},
+                "history": [],
+            }
+        )
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Encoding", "identity")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            for index, byte in enumerate(body):
+                self.wfile.write(bytes((byte,)))
+                self.wfile.flush()
+                if index == 0:
+                    self.started.set()
+                    time.sleep(self.stall_after_first_seconds or self.delay_seconds)
+                else:
+                    time.sleep(self.delay_seconds)
+        except OSError:
+            return
+        finally:
+            self.finished.set()
+
+
+def _open_descriptor_count() -> int | None:
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        try:
+            return len(os.listdir(directory))
+        except OSError:
+            continue
+    return None
+
+
+def test_interrupt_socket_duplication_supports_tls_wrappers() -> None:
+    local, peer = socket.socketpair()
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    wrapped = context.wrap_socket(
+        local,
+        server_hostname="localhost",
+        do_handshake_on_connect=False,
+    )
+    interrupt: socket.socket | None = None
+    try:
+        interrupt = _duplicate_interrupt_socket(wrapped)
+        peer.settimeout(0.2)
+        interrupt.shutdown(socket.SHUT_RDWR)
+        assert peer.recv(1) == b""
+    finally:
+        if interrupt is not None:
+            interrupt.close()
+        wrapped.close()
+        peer.close()
+
+
+def test_resolver_output_is_closed_bounded_and_ip_only() -> None:
+    valid = _resolved_addresses(
+        [
+            [socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "127.0.0.1", 443],
+            [socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "::1", 443, 0, 0],
+        ],
+        443,
+    )
+    assert [item.sockaddr for item in valid] == [("127.0.0.1", 443), ("::1", 443, 0, 0)]
+
+    invalid_values: list[object] = [
+        [],
+        [[socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "hostname", 443]],
+        [[socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "127.0.0.1", 443.0]],
+        [[socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_TCP, "127.0.0.1", 443]],
+        [[socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "127.0.0.1", 443, 0]],
+        [[socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "127.0.0.1", 443]] * 17,
+    ]
+    for value in invalid_values:
+        with pytest.raises(ValidationError, match="resolver"):
+            _resolved_addresses(value, 443)
+
+
+@pytest.mark.parametrize("failure_mode", ["stall", "fast-fail"])
+def test_multiaddress_connect_preserves_budget_for_live_second_address(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    total_timeout = 0.8
+    monkeypatch.setattr(
+        remote_worker_module,
+        "_TELEMETRY_REQUEST_TIMEOUT_SECONDS",
+        total_timeout,
+    )
+
+    class CloseProtocolHandler(_ProtocolHandler):
+        protocol_version = "HTTP/1.0"
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CloseProtocolHandler)
+    descriptor_count = _open_descriptor_count()
+    _ProtocolHandler.requests = []
+    _ProtocolHandler.request_headers = []
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    addresses = _resolved_addresses(
+        [
+            [
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "192.0.2.1",
+                server.server_port,
+            ],
+            [
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "127.0.0.1",
+                server.server_port,
+            ],
+        ],
+        server.server_port,
+    )
+    monkeypatch.setattr(
+        remote_worker_module,
+        "_resolve_controller_addresses",
+        lambda *_args, **_kwargs: addresses,
+    )
+    real_socket = socket.socket
+    attempt_timeouts: list[float] = []
+    failed_candidate_closed = threading.Event()
+
+    class FailedCandidate:
+        def settimeout(self, value: float) -> None:
+            attempt_timeouts.append(value)
+
+        def bind(self, _source_address: tuple[str, int]) -> None:
+            return
+
+        def connect(self, _address: object) -> None:
+            if failure_mode == "stall":
+                time.sleep(attempt_timeouts[-1])
+                raise TimeoutError("simulated blackhole")
+            raise ConnectionRefusedError("simulated fast failure")
+
+        def shutdown(self, _how: int) -> None:
+            return
+
+        def close(self) -> None:
+            failed_candidate_closed.set()
+
+    failed_candidate_returned = False
+
+    def socket_factory(*args: object, **kwargs: object) -> Any:
+        nonlocal failed_candidate_returned
+        if not failed_candidate_returned and "fileno" not in kwargs:
+            failed_candidate_returned = True
+            return FailedCandidate()
+        return real_socket(*args, **kwargs)
+
+    monkeypatch.setattr(remote_worker_module.socket, "socket", socket_factory)
+    try:
+        base = _config(tmp_path)
+        config = WorkerConfig(
+            controller_url=f"http://127.0.0.1:{server.server_port}",
+            worker_id=base.worker_id,
+            enrollment_token_file=base.enrollment_token_file,
+            state_root=base.state_root,
+            executor_path=base.executor_path,
+            poll_seconds=base.poll_seconds,
+            request_timeout_seconds=base.request_timeout_seconds,
+            max_job_seconds=base.max_job_seconds,
+            max_bundle_bytes=base.max_bundle_bytes,
+            telemetry_file=base.telemetry_file,
+        )
+        started_at = time.monotonic()
+        assert ScoutWorkerClient(config).telemetry(_session()).pending == 7
+        elapsed = time.monotonic() - started_at
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+    assert elapsed < total_timeout
+    assert len(attempt_timeouts) == 1
+    assert 0 < attempt_timeouts[0] <= total_timeout / 2
+    assert failed_candidate_closed.is_set()
+    assert [request[1] for request in _ProtocolHandler.requests] == ["/api/worker/v1/telemetry"]
+    if descriptor_count is not None:
+        assert cast(int, _open_descriptor_count()) <= descriptor_count
+    assert not any(
+        thread.name == "atlas-research-worker-telemetry-request-watchdog"
+        for thread in threading.enumerate()
+    )
+
+
+def test_resolver_stall_obeys_hard_deadline_and_reaps_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(remote_worker_module, "_TELEMETRY_REQUEST_TIMEOUT_SECONDS", 0.25)
+    monkeypatch.setattr(
+        remote_worker_module,
+        "_RESOLVER_PROGRAM",
+        "import time\ntime.sleep(2)\n",
+    )
+    real_popen = remote_worker_module.subprocess.Popen
+    processes: list[Any] = []
+    popen_kwargs: list[Mapping[str, object]] = []
+
+    def observed_popen(*args: object, **kwargs: object) -> Any:
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        popen_kwargs.append(kwargs)
+        return process
+
+    monkeypatch.setattr(remote_worker_module.subprocess, "Popen", observed_popen)
+    descriptor_count = _open_descriptor_count()
+    client = ScoutWorkerClient(_config(tmp_path))
+
+    started_at = time.monotonic()
+    with pytest.raises(RemoteWorkerError) as captured:
+        client.telemetry(_session())
+    elapsed = time.monotonic() - started_at
+
+    assert captured.value.code == "WORKER_CONTROLLER_UNAVAILABLE"
+    assert elapsed < 0.4
+    assert len(processes) == 1
+    assert processes[0].poll() is not None
+    assert popen_kwargs[0]["env"] == {}
+    assert SESSION_TOKEN not in repr(processes[0].args)
+    if descriptor_count is not None:
+        assert cast(int, _open_descriptor_count()) <= descriptor_count
+    assert not any(
+        thread.name == "atlas-research-worker-telemetry-request-watchdog"
+        for thread in threading.enumerate()
+    )
+
+
+def test_publisher_cancel_terminates_stalled_resolver_without_leaks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(remote_worker_module, "_TELEMETRY_REQUEST_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(
+        remote_worker_module,
+        "_RESOLVER_PROGRAM",
+        "import time\ntime.sleep(2)\n",
+    )
+    real_popen = remote_worker_module.subprocess.Popen
+    resolver_started = threading.Event()
+    processes: list[Any] = []
+
+    def observed_popen(*args: object, **kwargs: object) -> Any:
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        resolver_started.set()
+        return process
+
+    monkeypatch.setattr(remote_worker_module.subprocess, "Popen", observed_popen)
+    descriptor_count = _open_descriptor_count()
+    config = _config(tmp_path, telemetry=True)
+    worker = RemoteWorker(config)
+    worker._session = _session()
+    publisher = _TelemetryPublisher(worker._publish_telemetry_once, 60.0)
+    publisher.start()
+    assert resolver_started.wait(timeout=0.5)
+
+    started_at = time.monotonic()
+    assert publisher.stop() is True
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.25
+    assert len(processes) == 1
+    assert processes[0].poll() is not None
+    assert SESSION_TOKEN not in repr(processes[0].args)
+    if descriptor_count is not None:
+        assert cast(int, _open_descriptor_count()) <= descriptor_count
+    assert not any(
+        thread.name
+        in {
+            "atlas-research-worker-telemetry",
+            "atlas-research-worker-telemetry-request-watchdog",
+        }
+        for thread in threading.enumerate()
+    )
+
+
+def test_resolved_https_connection_preserves_host_header_and_sni(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ProtocolHandler)
+    _ProtocolHandler.requests = []
+    _ProtocolHandler.request_headers = []
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    server_names: list[str | None] = []
+
+    class PlaintextTLSContext:
+        verify_mode = ssl.CERT_REQUIRED
+        check_hostname = True
+
+        def wrap_socket(
+            self,
+            active_socket: socket.socket,
+            *,
+            server_hostname: str | None,
+        ) -> socket.socket:
+            server_names.append(server_hostname)
+            return active_socket
+
+    monkeypatch.setattr(
+        remote_worker_module.ssl,
+        "create_default_context",
+        lambda: PlaintextTLSContext(),
+    )
+    try:
+        base = _config(tmp_path)
+        config = WorkerConfig(
+            controller_url=f"https://localhost:{server.server_port}",
+            worker_id=base.worker_id,
+            enrollment_token_file=base.enrollment_token_file,
+            state_root=base.state_root,
+            executor_path=base.executor_path,
+            poll_seconds=base.poll_seconds,
+            request_timeout_seconds=base.request_timeout_seconds,
+            max_job_seconds=base.max_job_seconds,
+            max_bundle_bytes=base.max_bundle_bytes,
+        )
+
+        assert ScoutWorkerClient(config).telemetry(_session()).pending == 7
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+    assert server_names == ["localhost"]
+    assert _ProtocolHandler.request_headers[0]["host"] == f"localhost:{server.server_port}"
+
+
+def test_telemetry_request_has_hard_wall_clock_deadline_against_slow_drip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(remote_worker_module, "_TELEMETRY_REQUEST_TIMEOUT_SECONDS", 0.25)
+    _SlowTelemetryHandler.started.clear()
+    _SlowTelemetryHandler.finished.clear()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _SlowTelemetryHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        descriptor_count = _open_descriptor_count()
+        base = _config(tmp_path)
+        config = WorkerConfig(
+            controller_url=f"http://127.0.0.1:{server.server_port}",
+            worker_id=base.worker_id,
+            enrollment_token_file=base.enrollment_token_file,
+            state_root=base.state_root,
+            executor_path=base.executor_path,
+            poll_seconds=base.poll_seconds,
+            request_timeout_seconds=base.request_timeout_seconds,
+            max_job_seconds=base.max_job_seconds,
+            max_bundle_bytes=base.max_bundle_bytes,
+        )
+        client = ScoutWorkerClient(config)
+        started_at = time.monotonic()
+        with pytest.raises(RemoteWorkerError) as captured:
+            client.telemetry(_session())
+        elapsed = time.monotonic() - started_at
+
+        assert captured.value.code == "WORKER_CONTROLLER_UNAVAILABLE"
+        assert elapsed < 0.4
+        assert SESSION_TOKEN not in repr(captured.value)
+        assert _SlowTelemetryHandler.finished.wait(timeout=0.2)
+        time.sleep(0.02)
+        if descriptor_count is not None:
+            assert cast(int, _open_descriptor_count()) <= descriptor_count + 1
+        assert not any(
+            thread.name == "atlas-research-worker-telemetry-request-watchdog"
+            for thread in threading.enumerate()
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+
+def test_telemetry_publisher_shutdown_interrupts_active_request_without_thread_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(remote_worker_module, "_TELEMETRY_REQUEST_TIMEOUT_SECONDS", 1.0)
+    _SlowTelemetryHandler.started.clear()
+    _SlowTelemetryHandler.finished.clear()
+    _SlowTelemetryHandler.stall_after_first_seconds = 1.0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _SlowTelemetryHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        descriptor_count = _open_descriptor_count()
+        base = _config(tmp_path, telemetry=True)
+        config = WorkerConfig(
+            controller_url=f"http://127.0.0.1:{server.server_port}",
+            worker_id=base.worker_id,
+            enrollment_token_file=base.enrollment_token_file,
+            state_root=base.state_root,
+            executor_path=base.executor_path,
+            poll_seconds=base.poll_seconds,
+            request_timeout_seconds=base.request_timeout_seconds,
+            max_job_seconds=base.max_job_seconds,
+            max_bundle_bytes=base.max_bundle_bytes,
+            telemetry_file=base.telemetry_file,
+        )
+        worker = RemoteWorker(config)
+        worker._session = _session()
+        publisher = _TelemetryPublisher(worker._publish_telemetry_once, 60.0)
+        publisher.start()
+        assert _SlowTelemetryHandler.started.wait(timeout=1)
+        time.sleep(0.05)
+
+        started_at = time.monotonic()
+        assert publisher.stop() is True
+        elapsed = time.monotonic() - started_at
+
+        assert elapsed < 0.25
+        if descriptor_count is not None:
+            assert cast(int, _open_descriptor_count()) <= descriptor_count + 1
+        assert not any(
+            thread.name
+            in {
+                "atlas-research-worker-telemetry",
+                "atlas-research-worker-telemetry-request-watchdog",
+            }
+            for thread in threading.enumerate()
+        )
+    finally:
+        _SlowTelemetryHandler.stall_after_first_seconds = 0.0
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
 
 
 @pytest.mark.parametrize("terminal", ["complete", "fail"])
@@ -1340,6 +2181,53 @@ def test_terminal_ack_is_closed_and_ambiguous_responses_never_succeed(
         invoke()
 
 
+def test_client_telemetry_requires_closed_body_and_exact_response_headers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = ScoutWorkerClient(_config(tmp_path))
+    now = datetime.now(UTC).replace(microsecond=123_000)
+    value: dict[str, object] = {
+        "protocol_version": PROTOCOL_VERSION,
+        "collected_at": _telemetry_timestamp(now),
+        "queue": {"pending": 0, "in_flight": 0, "failed": 0},
+        "totals": {"processed": 0, "failed": 0},
+        "history": [],
+    }
+    headers = {
+        "content-type": "application/json; charset=utf-8",
+        "content-encoding": "identity",
+        "cache-control": "no-store",
+    }
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda *_args, **_kwargs: (200, canonical_json_bytes(value), headers),
+    )
+    assert client.telemetry(_session()).processed == 0
+
+    extended = dict(value)
+    extended["job_id"] = "secret-job"
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda *_args, **_kwargs: (200, canonical_json_bytes(extended), headers),
+    )
+    with pytest.raises(ValidationError, match="fields"):
+        client.telemetry(_session())
+
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda *_args, **_kwargs: (
+            200,
+            canonical_json_bytes(value),
+            {"content-type": "application/json; charset=utf-8"},
+        ),
+    )
+    with pytest.raises(ValidationError, match="headers"):
+        client.telemetry(_session())
+
+
 def test_http_client_uses_bearer_tokens_and_never_follows_redirects(tmp_path: Path) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ProtocolHandler)
     _ProtocolHandler.requests = []
@@ -1364,6 +2252,8 @@ def test_http_client_uses_bearer_tokens_and_never_follows_redirects(tmp_path: Pa
         client = ScoutWorkerClient(config)
         session = client.exchange_session()
         assert client.claim(session) is None
+        telemetry = client.telemetry(session)
+        assert telemetry.pending == 7
         artifact = RemoteArtifact(
             path="fixture.json",
             sha256=hashlib.sha256(_ProtocolHandler.artifact).hexdigest(),
@@ -1399,20 +2289,26 @@ def test_http_client_uses_bearer_tokens_and_never_follows_redirects(tmp_path: Pa
         "protocol_version": PROTOCOL_VERSION,
         "worker_id": "mac-mini-test",
     }
-    assert [request[1] for request in _ProtocolHandler.requests[:6]] == [
+    assert [request[1] for request in _ProtocolHandler.requests[:7]] == [
         "/api/worker/v1/session",
         "/api/worker/v1/claim",
+        "/api/worker/v1/telemetry",
         f"/api/worker/v1/objects/{JOB_OBJECT_ID}",
         "/api/worker/v1/heartbeat",
         "/api/worker/v1/complete",
         "/api/worker/v1/fail",
     ]
-    heartbeat_body = cast(dict[str, object], _ProtocolHandler.requests[3][3])
+    assert _ProtocolHandler.requests[2][3] == {
+        "protocol_version": PROTOCOL_VERSION,
+        "worker_id": "mac-mini-test",
+        "session_id": SESSION_ID,
+    }
+    heartbeat_body = cast(dict[str, object], _ProtocolHandler.requests[4][3])
     assert heartbeat_body["heartbeat_sequence"] == 1
-    fail_body = cast(dict[str, object], _ProtocolHandler.requests[5][3])
+    fail_body = cast(dict[str, object], _ProtocolHandler.requests[6][3])
     assert fail_body["code"] == "FIXTURE_FAILURE"
     assert "error_code" not in fail_body
-    object_headers = _ProtocolHandler.request_headers[2]
+    object_headers = _ProtocolHandler.request_headers[3]
     assert "x-atlas-worker-id" not in object_headers
     assert "x-atlas-worker-session-id" not in object_headers
     assert all("attacker.invalid" not in request[1] for request in _ProtocolHandler.requests)

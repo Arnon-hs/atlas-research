@@ -177,8 +177,13 @@ atlas-research worker serve --config /absolute/private/worker.json
 
 The config has the closed fields `protocol_version`, `controller_url`,
 `worker_id`, `enrollment_token_file`, `state_root`, and `executor_path`, plus
-optional bounded polling, request, job-time, and bundle ceilings. Both config
-and enrollment-token files must have mode `0600`; the state root must have mode
+optional bounded polling, request, job-time, and bundle ceilings. An operator
+may also set the optional absolute `telemetry_file`; the AtlasRepo Schema
+installation uses
+`/Users/neo/.local/state/atlas-research/worker-telemetry.json`. Its existing
+parent must be an operator-owned private directory, and any existing target
+must be a private single-link regular file. Both config and enrollment-token
+files must have mode `0600`; the state root and telemetry parent must have mode
 `0700`. Non-loopback controllers require HTTPS. Do not put the token itself in
 JSON, launchd plist files, shell environment, logs, or the repository.
 
@@ -195,3 +200,8 @@ fixed local executor, heartbeats from claim through staging and execution, and
 commits one validated canonical result of at most 256 KiB. `worker serve`
 repeats that flow with bounded backoff until SIGTERM or SIGINT. The status file
 contains only worker/job identifiers, fence, state, and a bounded error code.
+When `telemetry_file` is enabled, a separate sanitized operations projection is
+published from Scout aggregates whose `collected_at` is within the inclusive
+±30-second local freshness window; it never replaces or extends `status.json`.
+The background fetch has a hard five-second wall-clock deadline and is
+interruptible during service shutdown.
