@@ -1,0 +1,55 @@
+name: Queue pull requests for merge
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: auto-merge-open-pull-requests
+  cancel-in-progress: false
+
+jobs:
+  queue:
+    name: Enable squash auto-merge
+    if: github.repository == 'Arnon-hs/atlas-research'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Queue every open non-draft pull request to main
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          candidates="$(mktemp "${RUNNER_TEMP:?}/atlas-auto-merge.XXXXXX")"
+          trap 'rm -f "${candidates}"' EXIT HUP INT TERM
+          gh api --paginate \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "repos/${GH_REPO}/pulls?state=open&base=main&per_page=100" \
+            --jq '.[] | select(.draft == false and .auto_merge == null) | [.number, .head.sha] | @tsv' \
+            > "${candidates}"
+
+          failures=0
+          while IFS=$'\t' read -r pr_number head_sha; do
+            [[ "${pr_number}" =~ ^[1-9][0-9]*$ ]] || exit 64
+            [[ "${head_sha}" =~ ^[0-9a-f]{40}$ ]] || exit 65
+            if ! gh pr merge --repo "${GH_REPO}" --auto --squash \
+              --match-head-commit "${head_sha}" "${pr_number}"; then
+              echo "::warning title=Auto-merge not queued::PR #${pr_number}"
+              failures=1
+            fi
+          done < "${candidates}"
+
+          exit "${failures}"
