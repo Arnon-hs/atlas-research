@@ -34,6 +34,7 @@ from .doctor import run_doctor
 from .errors import AtlasResearchError, ResourceLimitError, ValidationError
 from .qwen import QwenContext, QwenProposer
 from .receipts import ReceiptLog
+from .remote_worker import RemoteWorker, load_worker_config
 from .report import serve_report, write_report
 from .worker import WorkerIdentity, run_isolated_job
 
@@ -223,6 +224,22 @@ def _worker_run(args: argparse.Namespace) -> int:
     return 0 if outcome.result.get("status") == "completed" else 1
 
 
+def _worker_once(args: argparse.Namespace) -> int:
+    worker = RemoteWorker(load_worker_config(Path(cast(str, args.config))))
+    worker.install_signal_handlers()
+    outcome = worker.run_once()
+    _emit(outcome.to_mapping())
+    return 0 if outcome.state in {"completed", "idle"} else 1
+
+
+def _worker_serve(args: argparse.Namespace) -> int:
+    worker = RemoteWorker(load_worker_config(Path(cast(str, args.config))))
+    worker.install_signal_handlers()
+    outcome = worker.serve()
+    _emit(outcome.to_mapping())
+    return 0
+
+
 def _receipt_verify(args: argparse.Namespace) -> int:
     verification = ReceiptLog(Path(cast(str, args.root))).verify(recover=cast(bool, args.recover))
     _emit(
@@ -306,6 +323,12 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--worker-id", default="local-worker")
     run.add_argument("--session-id", default="")
     run.set_defaults(handler=_worker_run)
+    once = worker_commands.add_parser("once", help="claim and execute at most one Scout lease")
+    once.add_argument("--config", required=True)
+    once.set_defaults(handler=_worker_once)
+    serve = worker_commands.add_parser("serve", help="serve Scout leases until interrupted")
+    serve.add_argument("--config", required=True)
+    serve.set_defaults(handler=_worker_serve)
 
     receipt = commands.add_parser("receipt", help="receipt log tooling")
     receipt_commands = receipt.add_subparsers(dest="receipt_command", required=True)

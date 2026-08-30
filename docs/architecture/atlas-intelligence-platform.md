@@ -312,10 +312,11 @@ variables, credential environment, artifact URL fetch, or general network is
 allowed. The only v0.1 network exception is fixed loopback Ollama. See the
 [security model](../security-model.md).
 
-## Future Scout-owned dual-workload worker
+## Scout-owned dual-workload worker
 
-Remote execution is blocked until Scout exposes authenticated claim, heartbeat,
-cancellation, and terminal-result endpoints. The envelope binds job digest,
+The research-only outbound client is implemented as an unreleased candidate;
+remote execution stays disabled until Scout exposes reviewed authenticated
+claim, heartbeat, cancellation, and terminal-result endpoints. The envelope binds job digest,
 worker/session, attempt, fence, lease deadline, heartbeat sequence, cancellation
 generation, and result digest. Expired leases cannot revive; stale attempts
 cannot commit.
@@ -341,7 +342,7 @@ does not use paid fallback without a separate budget policy.
 ```text
 Production networks                       Mac mini
 +------------------------------+          +-------------------------+
-| Scout controller / APIs      | <------- | outbound worker (future)|
+| Scout controller / APIs      | <------- | outbound worker client  |
 | Platform data/search         |  HTTPS   | local Qwen on loopback  |
 | Admin and Web API consumers  |          | isolated workspaces     |
 +------------------------------+          +-------------------------+
@@ -354,7 +355,8 @@ Production networks                       Mac mini
 +------------------------------+
 ```
 
-AtlasRepo Schema may later describe optional services/profiles, image digests,
+AtlasRepo Schema describes the optional launchd supervisor and the existing
+one-shot image boundary. It may later add production-inference topology, image digests,
 health checks, resources, secret names, and network edges. Research stays off
 the data network and gets no production PostgreSQL, Redis, deploy, billing,
 GitHub administration, or long-lived artifact-store credentials.
@@ -377,7 +379,7 @@ digests are forbidden metric labels.
 | 1 Architecture/contracts | Research plus canonical owners | ADRs, registry, Research schemas, Score/feedback proposals | In progress |
 | 2 Engine evidence gaps | Atlas Engine | One bounded deterministic evidence change/schema | Only after a measured gap; reuse current release |
 | 3 Intelligence pipeline | Scout | Stage planner, safety, canonical outputs, idempotent queue tests | Depends on phase 1 and active Scout work |
-| 4 Mac worker | Scout/worker; Schema later | Lease/fence/heartbeat/fallback failure tests | Offline Research worker may test in parallel; remote blocked by phase 3 |
+| 4 Mac worker | Scout/worker; Schema | Lease/fence/heartbeat/failure tests | Research-only client in review; production inference/fallback still depends on phase 3 |
 | 5 Atlas Score | Scout/Platform | ScoreCard/history/provenance/activation audit | Depends on evidence/stage contracts |
 | 6 Canonical document/embeddings | Scout/Platform | Canonical schema, digest identity, live/batch path | Extend existing embedding path only |
 | 7 Index generations/reindex | Scout/Admin | Estimate, confirmation, build/verify/atomic switch | Depends on phase 6 |

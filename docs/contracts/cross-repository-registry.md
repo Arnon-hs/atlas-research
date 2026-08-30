@@ -17,8 +17,8 @@ instructions to fetch source.
 | Admin -> Scout | Scout persistence, Admin interaction | target `atlas-feedback.v1` request/audit response | Proposal only | Bind reviewer/material/ScoreCard version; comments remain data |
 | Scout -> Platform Search | Scout/Platform boundary | target canonical intelligence document v1 plus existing embedding identity | Existing embedding path; canonical enrichment extension absent | Extend current implementation; no parallel vector store |
 | Platform -> Web | Platform | target `atlas-score-public.v1` stable API | Web presentation shell exists behind a disabled gate; canonical API absent | Active sanitized ScoreCard and safe evidence only |
-| Scout -> Mac worker | Scout | future authenticated worker protocol | Blocked; no v0.1 network control plane | Scout owns lease, attempt, fence, heartbeat, cancel, fallback, terminal CAS |
-| Research job -> offline worker | Atlas Research | `research-experiment-job.v1` / `research-experiment-result.v1` | Implemented locally for v0.1; registry image manifest absent | File exchange only; not a generic production protocol |
+| Scout -> Mac worker | Scout | authenticated worker protocol v1 | Unreleased Research client candidate; Scout endpoint remains disabled and undeployed | Scout owns lease, attempt, fence, heartbeat, cancel, fallback, terminal CAS; client accepts data, never a server command |
+| Research job -> offline worker | Atlas Research | `research-experiment-job.v1` / `research-experiment-result.v1` | Implemented for v0.1; public arm64 image `b508391b654b@sha256:09f1c9fd132bb52cb43d02550c1d396385dfb9ddb9479f6c896b9d2fd775ce76` and committed fixture are verified | File exchange only; not a generic production protocol |
 
 ## Change policy
 

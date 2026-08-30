@@ -5,10 +5,11 @@ AtlasRepo ecosystem. It turns pinned evidence into reproducible datasets,
 evaluates one-variable scoring hypotheses, and emits immutable experiment
 receipts for human review.
 
-> **Status:** v0.1 implementation candidate. The portable core, contracts,
-> isolated worker, receipts, and local review report are implemented and tested;
-> production import and activation remain intentionally absent. Nothing produced
-> by this repository authorizes automatic production activation.
+> **Status:** v0.1 offline core plus an unreleased Scout-client candidate. The
+> portable core, isolated worker, receipts, and local review report are tested.
+> The outbound client is disabled until a compatible Scout controller enrolls
+> it; production import and activation remain intentionally absent. Nothing
+> produced by this repository authorizes automatic production activation.
 
 ## Why this exists
 
@@ -51,12 +52,13 @@ mean deploy, publish, activate, or replace a production scoring model.
 - bounded, multi-metric offline evaluation;
 - append-only, hash-chained experiment receipts;
 - an offline JSON-in/JSON-out worker for a least-privilege Mac mini;
+- a single-concurrency outbound client for Scout-owned research leases;
 - optional local Qwen/Ollama hypothesis generation;
 - a static local report for review.
 
-Out of scope are production databases, Redis/BullMQ, embeddings, a generic
-remote worker controller, model activation, public API changes, and deployment
-topology.
+Out of scope are production databases, Redis/BullMQ, embeddings, a remote
+worker controller, model activation, public API changes, and deployment
+topology. Scout owns the controller; AtlasRepo Schema owns service topology.
 
 ## Quick start
 
@@ -102,6 +104,9 @@ and Docker commands. Public JSON Schemas live in [`schemas/v1`](schemas/v1).
   durable bytes fit the reduced workspace ceiling;
 - the container profile is designed for `--network none`; local Qwen runs as a
   separate loopback-only proposal step;
+- the outbound supervisor accepts only same-origin, digest-pinned data objects,
+  keeps its enrollment credential outside the repository, and invokes one
+  operator-pinned local executor rather than a server-supplied command;
 - receipts are private, append-only, hash-chained, and idempotency-bound;
 - sealed test evaluation fails closed in v0.1 until an external operator
   capability is implemented;
@@ -116,6 +121,7 @@ and Docker commands. Public JSON Schemas live in [`schemas/v1`](schemas/v1).
 - [Portable contract policy](docs/contracts/README.md)
 - [Getting started](docs/getting-started.md)
 - [Worker and threat boundaries](docs/worker-security.md)
+- [Scout worker client](docs/scout-worker-client.md)
 
 ## Inspiration
 

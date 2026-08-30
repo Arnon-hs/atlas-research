@@ -17,5 +17,9 @@ versioning when the first release is tagged.
 - Optional loopback-only `qwen3:8b` structured hypothesis generation.
 - Static aggregate-only review report and loopback GET/HEAD server.
 - Public CI, CodeQL, dependency review, Dependabot, DCO, and community policy.
+- Experimental outbound Scout worker client with strict session, claim,
+  heartbeat, cancellation, same-origin artifact, and fenced terminal-result
+  contracts. The client remains inert without operator configuration and a
+  compatible Scout-owned controller.
 
 [Unreleased]: https://github.com/Arnon-hs/atlas-research/commits/main
