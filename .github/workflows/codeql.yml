@@ -1,12 +1,21 @@
 name: CodeQL
+run-name: Exact revision ${{ inputs.revision || github.sha }}
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      revision:
+        description: Immutable commit SHA to verify
+        required: false
+        type: string
   schedule:
     - cron: "17 3 * * 2"
+
+env:
+  ATLAS_RESEARCH_REVISION: ${{ inputs.revision || github.sha }}
 
 permissions:
   contents: read
@@ -19,6 +28,11 @@ jobs:
     steps:
       - name: Check out exact revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.ATLAS_RESEARCH_REVISION }}
+
+      - name: Verify exact revision
+        run: test "$(git rev-parse HEAD)" = "${ATLAS_RESEARCH_REVISION}"
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@486fec2a3ea2626afcd8c7e9208b4f515078dd7e # codeql-bundle-v2.26.4
@@ -27,3 +41,6 @@ jobs:
 
       - name: Analyze
         uses: github/codeql-action/analyze@486fec2a3ea2626afcd8c7e9208b4f515078dd7e # codeql-bundle-v2.26.4
+        with:
+          ref: ${{ github.ref }}
+          sha: ${{ env.ATLAS_RESEARCH_REVISION }}
