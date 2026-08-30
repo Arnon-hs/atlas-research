@@ -45,7 +45,7 @@ dev = [
     { name = "pip-audit", specifier = ">=2.9,<3" },
     { name = "pytest", specifier = ">=9.0.3,<10" },
     { name = "pytest-cov", specifier = ">=6.2,<7" },
-    { name = "ruff", specifier = ">=0.12,<1" },
+    { name = "ruff", specifier = ">=0.16.4,<1" },
 ]
 
 [[package]]
