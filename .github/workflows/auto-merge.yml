@@ -53,3 +53,43 @@ jobs:
           done < "${candidates}"
 
           exit "${failures}"
+
+  verify-main:
+    name: Dispatch checks for the current main revision
+    if: github.repository == 'Arnon-hs/atlas-research' && github.event_name != 'pull_request_target'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Dispatch missing exact-revision checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          main_sha="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "repos/${GH_REPO}/commits/main" --jq '.sha')"
+          [[ "${main_sha}" =~ ^[0-9a-f]{40}$ ]] || exit 65
+
+          for workflow in ci.yml codeql.yml; do
+            matching="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "repos/${GH_REPO}/actions/workflows/${workflow}/runs?head_sha=${main_sha}&per_page=1" \
+              --jq '.total_count')"
+            [[ "${matching}" =~ ^[0-9]+$ ]] || exit 66
+
+            if (( matching == 0 )); then
+              gh api --method POST \
+                -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                "repos/${GH_REPO}/actions/workflows/${workflow}/dispatches" \
+                -f ref=main
+            fi
+          done
