@@ -530,19 +530,17 @@ jobs:
           if not isinstance(labels, dict) or any(labels.get(key) != value for key, value in expected.items()):
               raise SystemExit("platform image labels do not match the tagged GitHub revision")
           PY
-          done < "$descriptors_file"
-
-          for platform in linux/amd64 linux/arm64; do
+            platform="${os_name}/${architecture}"
             provenance="$(docker run --rm --platform "$platform" --network none --read-only \
               --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 \
-              --entrypoint cat "${IMAGE_NAME}@${IMAGE_DIGEST}" \
+              --entrypoint cat "${IMAGE_NAME}@${platform_digest}" \
               /usr/local/share/atlas-research/source-provenance)"
             test "$(printf '%s\n' "$provenance" | sed -n '1p')" = "$GITHUB_SHA"
             [[ "$(printf '%s\n' "$provenance" | sed -n '2p')" =~ ^[0-9a-f]{64}$ ]]
             docker run --rm --platform "$platform" --network none --read-only \
               --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 \
-              "${IMAGE_NAME}@${IMAGE_DIGEST}" --version
-          done
+              "${IMAGE_NAME}@${platform_digest}" --version
+          done < "$descriptors_file"
 
           printf 'digest=%s\n' "$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
 
