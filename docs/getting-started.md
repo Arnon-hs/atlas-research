@@ -29,7 +29,7 @@ checksums and GitHub provenance, and install the wheel directly:
 
 ```bash
 release_repo="Arnon-hs/atlas-research"
-release_tag="v0.1.0"
+release_tag="v0.2.0"
 release_ref="refs/tags/$release_tag"
 release_sha="$(
   git ls-remote --tags "https://github.com/${release_repo}.git" \
@@ -49,10 +49,10 @@ gh release download "$release_tag" \
   --dir "$release_dir"
 
 release_subjects=(
-  "atlasrepo_research-0.1.0-py3-none-any.whl"
-  "atlasrepo_research-0.1.0.tar.gz"
-  "atlasrepo-research-0.1.0-source.spdx.json"
-  "atlasrepo-research-0.1.0-image-digest.txt"
+  "atlasrepo_research-0.2.0-py3-none-any.whl"
+  "atlasrepo_research-0.2.0.tar.gz"
+  "atlasrepo-research-0.2.0-source.spdx.json"
+  "atlasrepo-research-0.2.0-image-digest.txt"
 )
 expected_subjects="$(printf '%s\n' "${release_subjects[@]}" | sort)"
 actual_subjects="$(awk 'NF == 2 { print $2 }' \
@@ -83,8 +83,8 @@ for asset_name in "${release_subjects[@]}"; do
 done
 
 for package_name in \
-  "atlasrepo_research-0.1.0-py3-none-any.whl" \
-  "atlasrepo_research-0.1.0.tar.gz"
+  "atlasrepo_research-0.2.0-py3-none-any.whl" \
+  "atlasrepo_research-0.2.0.tar.gz"
 do
   verify_release_attestation \
     "$release_dir/$package_name" "https://spdx.dev/Document/v2.3" \
@@ -92,7 +92,7 @@ do
 done
 
 python -m pip install --no-deps \
-  "$release_dir/atlasrepo_research-0.1.0-py3-none-any.whl"
+  "$release_dir/atlasrepo_research-0.2.0-py3-none-any.whl"
 atlas-research --version
 ```
 
@@ -103,7 +103,7 @@ Schema:
 
 ```bash
 image="$(tr -d '\n' < \
-  "$release_dir/atlasrepo-research-0.1.0-image-digest.txt")"
+  "$release_dir/atlasrepo-research-0.2.0-image-digest.txt")"
 gh_user="$(gh api user --jq .login)"
 gh auth token | docker login ghcr.io --username "$gh_user" --password-stdin
 verify_release_attestation \

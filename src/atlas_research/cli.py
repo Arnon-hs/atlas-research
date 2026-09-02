@@ -32,6 +32,10 @@ from .constants import (
 from .dataset import SplitName, build_dataset_manifest, freeze_jsonl_sources
 from .doctor import run_doctor
 from .errors import AtlasResearchError, ResourceLimitError, ValidationError
+from .production_generation_worker import (
+    ProductionGenerationWorker,
+    load_production_generation_worker_config,
+)
 from .qwen import QwenContext, QwenProposer
 from .receipts import ReceiptLog
 from .remote_worker import RemoteWorker, load_worker_config
@@ -240,6 +244,26 @@ def _worker_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _production_worker_once(args: argparse.Namespace) -> int:
+    worker = ProductionGenerationWorker(
+        load_production_generation_worker_config(Path(cast(str, args.config)))
+    )
+    worker.install_signal_handlers()
+    outcome = worker.run_once()
+    _emit(outcome.to_mapping())
+    return 0 if outcome.state in {"completed", "idle"} else 1
+
+
+def _production_worker_serve(args: argparse.Namespace) -> int:
+    worker = ProductionGenerationWorker(
+        load_production_generation_worker_config(Path(cast(str, args.config)))
+    )
+    worker.install_signal_handlers()
+    outcome = worker.serve()
+    _emit(outcome.to_mapping())
+    return 0
+
+
 def _receipt_verify(args: argparse.Namespace) -> int:
     verification = ReceiptLog(Path(cast(str, args.root))).verify(recover=cast(bool, args.recover))
     _emit(
@@ -329,6 +353,23 @@ def _parser() -> argparse.ArgumentParser:
     serve = worker_commands.add_parser("serve", help="serve Scout leases until interrupted")
     serve.add_argument("--config", required=True)
     serve.set_defaults(handler=_worker_serve)
+
+    production_worker = commands.add_parser(
+        "production-worker", help="Scout production generation worker"
+    )
+    production_worker_commands = production_worker.add_subparsers(
+        dest="production_worker_command", required=True
+    )
+    production_once = production_worker_commands.add_parser(
+        "once", help="claim and execute one production generation lease"
+    )
+    production_once.add_argument("--config", required=True)
+    production_once.set_defaults(handler=_production_worker_once)
+    production_serve = production_worker_commands.add_parser(
+        "serve", help="serve production generation leases until interrupted"
+    )
+    production_serve.add_argument("--config", required=True)
+    production_serve.set_defaults(handler=_production_worker_serve)
 
     receipt = commands.add_parser("receipt", help="receipt log tooling")
     receipt_commands = receipt.add_subparsers(dest="receipt_command", required=True)
