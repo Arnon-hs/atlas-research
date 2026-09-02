@@ -10,7 +10,7 @@ AtlasRepo ecosystem. It turns pinned evidence into reproducible datasets,
 evaluates one-variable scoring hypotheses, and emits immutable experiment
 receipts for human review.
 
-> **Status:** alpha, versioned as v0.1.0. The portable core, isolated worker,
+> **Status:** alpha, versioned as v0.2.0. The portable core, isolated worker,
 > receipts, and local review report are tested. The outbound client is
 > experimental, disabled by default, and inert without explicit enrollment by a
 > compatible Scout controller; production import and activation remain
@@ -51,7 +51,7 @@ immutable dataset -> one-variable candidate -> bounded evaluation
 `KEEP` means that a candidate passed the declared offline gates. It does not
 mean deploy, publish, activate, or replace a production scoring model.
 
-## v0.1 scope
+## Current scope
 
 - content-addressed artifact references;
 - deterministic dataset splits and manifests;
@@ -60,6 +60,8 @@ mean deploy, publish, activate, or replace a production scoring model.
 - append-only, hash-chained experiment receipts;
 - an offline JSON-in/JSON-out worker for a least-privilege Mac mini;
 - a single-concurrency outbound client for Scout-owned research leases;
+- a separate single-concurrency client for Scout-owned production description
+  and Atlas Score generation leases;
 - optional local Qwen/Ollama hypothesis generation;
 - a static local report for review.
 
@@ -71,7 +73,8 @@ topology. Scout owns the controller; AtlasRepo Schema owns service topology.
 
 Requirements: Python 3.11+ and
 [uv](https://docs.astral.sh/uv/getting-started/installation/). Ollama and
-`qwen3:8b` are optional and used only by the hypothesis command.
+`qwen3:8b` are optional for the research hypothesis command and required only
+when an operator deliberately runs the production-generation client.
 
 ```bash
 git clone https://github.com/Arnon-hs/atlas-research.git
@@ -108,7 +111,7 @@ GitHub Release assets and the matching multi-architecture image:
 - wheel and source distribution;
 - `SHA256SUMS`, an exact image-digest record, and a source SPDX JSON SBOM;
 - GitHub build-provenance and SBOM attestations;
-- `ghcr.io/arnon-hs/atlas-research:v0.1.0` for `linux/amd64` and
+- `ghcr.io/arnon-hs/atlas-research:v0.2.0` for `linux/amd64` and
   `linux/arm64`, with BuildKit provenance and SBOM attestations.
 
 No mutable `latest` image tag is published. Operators should verify the GitHub
@@ -132,6 +135,9 @@ exact commands.
 - the outbound supervisor accepts only same-origin, digest-pinned data objects,
   keeps its enrollment credential outside the repository, and invokes one
   operator-pinned local executor rather than a server-supplied command;
+- the production-generation supervisor accepts only two fixed workloads, binds
+  Scout's assignment digest, uses exact loopback Qwen, and keeps every database
+  write, fallback, scheduling, and ScoreCard identity decision in Scout;
 - remote completion sends canonical result JSON and a receipt reference, not
   the receipt body; v0.1 does not claim durable cross-host receipt retention;
 - receipts are private, append-only, hash-chained, and idempotency-bound;
@@ -149,6 +155,7 @@ exact commands.
 - [Getting started](docs/getting-started.md)
 - [Worker and threat boundaries](docs/worker-security.md)
 - [Scout worker client](docs/scout-worker-client.md)
+- [Production generation worker](docs/production-generation-worker.md)
 
 ## Inspiration
 

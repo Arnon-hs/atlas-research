@@ -53,6 +53,16 @@ is one bounded JSON object with known keys. Code, shell text, markup, URLs,
 paths, tool calls, unknown/nested keys, non-finite/out-of-range values, and
 multiple changes fail closed.
 
+The separate production-generation path accepts only Scout's closed
+`content.description.regenerate` and `atlas.score.generate` jobs. It recomputes
+the normalized source, input, and assignment digests before contacting Ollama.
+The worker rejects deterministic prompt-injection markers before any model call.
+The fixed prompt then treats source text as data, the model is restricted to
+exact structured output, and a deterministic validator rejects extra fields,
+unsafe public text, unknown evidence references, or incomplete Score values. Model
+output cannot select a command, URL, provider, release, policy, target, or
+ScoreCard identity. Scout builds and validates the final ScoreCard.
+
 ## Receipts and replay
 
 Atlas canonical JSON v1 binds exact job and input/output digests to the nested

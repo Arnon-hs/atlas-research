@@ -99,6 +99,16 @@ class QwenProposal:
 
 
 @dataclass(frozen=True, slots=True)
+class QwenStructuredResult:
+    """One strictly parsed structured response with immutable model/prompt identity."""
+
+    value: Mapping[str, object]
+    model: str
+    model_sha256: str
+    prompt_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class QwenHTTPResponse:
     """A bounded transport response, exposed to make tests network-free."""
 
@@ -284,6 +294,104 @@ class QwenProposer:
         if len(response.body) > maximum:
             raise QwenError("QWEN_RESPONSE_TOO_LARGE", "local Ollama response exceeds the limit")
         return response
+
+
+class QwenStructuredGenerator:
+    """Generate one bounded JSON object from a fixed operator-owned prompt and schema."""
+
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = MAX_QWEN_TIMEOUT_SECONDS,
+        transport: QwenTransport | None = None,
+        expected_model_sha256: str | None = None,
+    ) -> None:
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+            or timeout_seconds > MAX_QWEN_TIMEOUT_SECONDS
+        ):
+            raise QwenError("QWEN_TIMEOUT_INVALID", "Qwen timeout exceeds the operator ceiling")
+        self._timeout_seconds = float(timeout_seconds)
+        self._transport = transport if transport is not None else _LoopbackTransport()
+        if (
+            expected_model_sha256 is not None
+            and _MODEL_DIGEST_RE.fullmatch(expected_model_sha256) is None
+        ):
+            raise QwenError("QWEN_MODEL_DIGEST_INVALID", "Expected Qwen model digest is invalid")
+        self._expected_model_sha256 = expected_model_sha256
+
+    def generate(
+        self,
+        *,
+        prompt: str,
+        response_schema: Mapping[str, object],
+        expected_fields: frozenset[str],
+        max_response_bytes: int,
+    ) -> QwenStructuredResult:
+        """Run one temperature-zero generation and reject every extended response."""
+
+        if (
+            not isinstance(prompt, str)
+            or not prompt
+            or len(prompt.encode("utf-8")) > MAX_QWEN_RESPONSE_BYTES
+            or not expected_fields
+            or not 1 <= max_response_bytes <= MAX_QWEN_RESPONSE_BYTES
+        ):
+            raise QwenError("QWEN_REQUEST_INVALID", "Qwen structured request is invalid")
+        deadline = time.monotonic() + self._timeout_seconds
+        proposer = QwenProposer(
+            timeout_seconds=self._timeout_seconds,
+            transport=self._transport,
+        )
+        model_digest = proposer.model_sha256(deadline=deadline)
+        if self._expected_model_sha256 is not None and model_digest != self._expected_model_sha256:
+            raise QwenError(
+                "QWEN_MODEL_REVISION_MISMATCH", "Qwen model does not match the pinned revision"
+            )
+        prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        request_body = json.dumps(
+            {
+                "model": QWEN_MODEL,
+                "prompt": prompt,
+                "format": dict(response_schema),
+                "stream": False,
+                "options": {"temperature": 0, "num_predict": 2048},
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if len(request_body) > MAX_QWEN_RESPONSE_BYTES:
+            raise QwenError("QWEN_REQUEST_TOO_LARGE", "Qwen request exceeds the size limit")
+        response = proposer._request(
+            "POST",
+            "/api/generate",
+            request_body,
+            max_response_bytes,
+            deadline=deadline,
+        )
+        envelope = _strict_json_object(response.body, maximum_depth=MAX_JSON_DEPTH)
+        if envelope.get("model") != QWEN_MODEL or envelope.get("done") is not True:
+            raise QwenError("QWEN_RESPONSE_INCOMPLETE", "Qwen response is incomplete")
+        raw_value = envelope.get("response")
+        if not isinstance(raw_value, str) or len(raw_value.encode("utf-8")) > max_response_bytes:
+            raise QwenError("QWEN_RESPONSE_INVALID", "Qwen structured payload is invalid")
+        value = _strict_json_object(raw_value.encode("utf-8"), maximum_depth=MAX_JSON_DEPTH)
+        if set(value) != expected_fields:
+            raise QwenError("QWEN_RESPONSE_FIELDS_INVALID", "Qwen response fields are invalid")
+        final_model_digest = proposer.model_sha256(deadline=deadline)
+        if final_model_digest != model_digest:
+            raise QwenError("QWEN_MODEL_CHANGED", "Qwen model identity changed during generation")
+        return QwenStructuredResult(
+            value=value,
+            model=QWEN_MODEL,
+            model_sha256=model_digest,
+            prompt_sha256=prompt_digest,
+        )
 
 
 def qwen_available(

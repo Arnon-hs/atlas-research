@@ -380,7 +380,7 @@ digests are forbidden metric labels.
 | 1 Architecture/contracts | Research plus canonical owners | ADRs, registry, Research schemas, Score/feedback proposals | In progress |
 | 2 Engine evidence gaps | Atlas Engine | One bounded deterministic evidence change/schema | Only after a measured gap; reuse current release |
 | 3 Intelligence pipeline | Scout | Stage planner, safety, canonical outputs, idempotent queue tests | Depends on phase 1 and active Scout work |
-| 4 Mac worker | Scout/worker; Schema | Lease/fence/heartbeat/failure tests | Research-only client in review; production inference/fallback still depends on phase 3 |
+| 4 Mac worker | Scout/Research/Schema | Lease/fence/heartbeat/failure tests plus release-pinned user service | Local production client and Schema lifecycle implemented; activation blocked on Scout paid fallback executor, budget ledger, and outbox |
 | 5 Atlas Score | Scout/Platform | ScoreCard/history/provenance/activation audit | Depends on evidence/stage contracts |
 | 6 Canonical document/embeddings | Scout/Platform | Canonical schema, digest identity, live/batch path | Extend existing embedding path only |
 | 7 Index generations/reindex | Scout/Admin | Estimate, confirmation, build/verify/atomic switch | Depends on phase 6 |

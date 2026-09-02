@@ -13,6 +13,7 @@ import pytest
 
 from atlas_research import cli
 from atlas_research.doctor import DoctorCheck, DoctorReport
+from atlas_research.production_generation_worker import ProductionGenerationRunOutcome
 from atlas_research.qwen import QwenProposal
 from atlas_research.worker import WorkerOutcome
 
@@ -186,6 +187,38 @@ def test_worker_command_forwards_identity_and_reports_noncompleted_status(
     assert exit_code == 1
     assert cast(SimpleNamespace, captured["identity"]).worker_id == "worker-a"
     assert _output(capfd)["result"] == {"status": "rejected"}
+
+
+def test_production_worker_once_uses_dedicated_config_and_emits_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    config = object()
+    observed: dict[str, object] = {}
+
+    class FakeWorker:
+        def __init__(self, selected: object) -> None:
+            observed["config"] = selected
+
+        def install_signal_handlers(self) -> None:
+            observed["signals"] = True
+
+        def run_once(self) -> ProductionGenerationRunOutcome:
+            return ProductionGenerationRunOutcome(
+                "completed", job_id="generation-job-1", result_sha256="a" * 64
+            )
+
+    monkeypatch.setattr(cli, "load_production_generation_worker_config", lambda path: config)
+    monkeypatch.setattr(cli, "ProductionGenerationWorker", FakeWorker)
+
+    assert cli.main(["production-worker", "once", "--config", "/private/worker.json"]) == 0
+    assert observed == {"config": config, "signals": True}
+    assert _output(capfd) == {
+        "state": "completed",
+        "job_id": "generation-job-1",
+        "result_sha256": "a" * 64,
+        "error_code": None,
+    }
 
 
 def test_cli_errors_are_bounded_json(

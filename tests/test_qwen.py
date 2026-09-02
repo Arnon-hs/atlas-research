@@ -18,6 +18,7 @@ from atlas_research.qwen import (
     QwenError,
     QwenHTTPResponse,
     QwenProposer,
+    QwenStructuredGenerator,
     qwen_available,
 )
 
@@ -124,6 +125,51 @@ def test_example_context_with_decimal_metrics_reaches_fake_transport() -> None:
         ("POST", "/api/generate"),
         ("GET", "/api/tags"),
     ]
+
+
+def test_structured_generation_binds_model_prompt_and_exact_fields() -> None:
+    transport = FakeTransport(proposal='{"description":"Bounded useful summary."}')
+    result = QwenStructuredGenerator(transport=transport).generate(
+        prompt="Return a bounded description.",
+        response_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["description"],
+            "properties": {"description": {"type": "string", "maxLength": 2000}},
+        },
+        expected_fields=frozenset({"description"}),
+        max_response_bytes=4096,
+    )
+
+    assert result.value == {"description": "Bounded useful summary."}
+    assert result.model == QWEN_MODEL
+    assert result.model_sha256 == "a" * 64
+    assert len(result.prompt_sha256) == 64
+    assert [(method, path) for method, path, _body in transport.calls] == [
+        ("GET", "/api/tags"),
+        ("POST", "/api/generate"),
+        ("GET", "/api/tags"),
+    ]
+
+
+def test_structured_generation_rejects_extended_or_oversized_payloads() -> None:
+    extended = FakeTransport(proposal='{"description":"ok","other":true}')
+    with pytest.raises(QwenError, match="QWEN_RESPONSE_FIELDS_INVALID"):
+        QwenStructuredGenerator(transport=extended).generate(
+            prompt="Return JSON.",
+            response_schema={"type": "object"},
+            expected_fields=frozenset({"description"}),
+            max_response_bytes=128,
+        )
+
+    oversized = FakeTransport(proposal='{"description":"' + ("x" * 256) + '"}')
+    with pytest.raises(QwenError, match="QWEN_RESPONSE_TOO_LARGE"):
+        QwenStructuredGenerator(transport=oversized).generate(
+            prompt="Return JSON.",
+            response_schema={"type": "object"},
+            expected_fields=frozenset({"description"}),
+            max_response_bytes=64,
+        )
 
 
 @pytest.mark.parametrize(

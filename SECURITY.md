@@ -3,10 +3,10 @@
 ## Supported versions
 
 Atlas Research is alpha software. Security fixes are applied to the default
-branch. After the first immutable v0.1.x GitHub Release is published, only the
-latest v0.1.x release receives best-effort security fixes; older tags and
-unreleased commits are not supported release lines. No v0.1.x release is a
-supported production control plane or a production-activation authority.
+branch. After an immutable release is published, only the latest release on the
+current minor line receives best-effort security fixes; older tags and
+unreleased commits are not supported release lines. No Atlas Research release
+is a production control plane or a production-activation authority.
 
 ## Reporting a vulnerability
 
