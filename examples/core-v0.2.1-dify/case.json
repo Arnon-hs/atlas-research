@@ -1,0 +1,52 @@
+{
+  "schema_version": "atlasrepo.research/core-golden-eval-case/v0.1",
+  "case_id": "dify-core-v0.2.1-conditional",
+  "feature_flag": {
+    "name": "ATLAS_RESEARCH_CORE_EVAL_ENABLED",
+    "default": "false"
+  },
+  "core_release": {
+    "repository": "https://github.com/Arnon-hs/atlasrepo-core",
+    "version": "0.2.1",
+    "tag": "v0.2.1",
+    "commit": "6bffb144add56d13de0c0bf9be9c39931ec0c9bb",
+    "release_uri": "https://github.com/Arnon-hs/atlasrepo-core/releases/tag/v0.2.1",
+    "package_uri": "https://github.com/Arnon-hs/atlasrepo-core/releases/download/v0.2.1/atlasrepo-core-0.2.1.tgz",
+    "package_size_bytes": 356223,
+    "package_sha256": "sha256:445a986cba38a87edcbdd50c787e7468e057d42bd3792aab2824e0a78fc2d81b",
+    "license": "Apache-2.0"
+  },
+  "artifact": {
+    "path": "decision-pack.v0.1.json",
+    "source_path": "examples/dify/decision-pack.v0.1.json",
+    "resource_ref": "github:Arnon-hs/atlasrepo-core@6bffb144add56d13de0c0bf9be9c39931ec0c9bb:examples/dify/decision-pack.v0.1.json",
+    "public_uri": "https://github.com/Arnon-hs/atlasrepo-core/blob/6bffb144add56d13de0c0bf9be9c39931ec0c9bb/examples/dify/decision-pack.v0.1.json",
+    "access_hint": "public",
+    "size_bytes": 7141,
+    "raw_sha256": "sha256:e16639137039b5d3237f20b8447bef7dd4735aed33e55fd6be3357924b308261",
+    "canonical_sha256": "sha256:0f4863d6b583f6ae00eef4a4cde9cdebc6be575c5e99ec827ccb0436dc4282f5"
+  },
+  "redistribution": {
+    "license": {
+      "path": "LICENSE.atlasrepo-core",
+      "size_bytes": 11357,
+      "raw_sha256": "sha256:c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    "notice": {
+      "path": "NOTICE.atlasrepo-core",
+      "size_bytes": 123,
+      "raw_sha256": "sha256:247a5b7ccd7fc0335c030e1d00e060b1ebcb0a8897e8e3cf8754d9fa54da225a"
+    }
+  },
+  "expectation": {
+    "schema_version": "atlasrepo.core/decision-pack/v0.1",
+    "decision_status": "conditional",
+    "citation_count": 9,
+    "unresolved_gates": [
+      "license-review",
+      "local-runtime-pilot",
+      "operations-review",
+      "security-review"
+    ]
+  }
+}
