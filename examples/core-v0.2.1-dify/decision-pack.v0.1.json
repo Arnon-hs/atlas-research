@@ -1,0 +1,128 @@
+{
+  "schemaVersion": "atlasrepo.core/decision-pack/v0.1",
+  "id": "c708a342-d1f8-407b-9a12-a26522b24708",
+  "createdAt": "2026-09-05T01:00:00+07:00",
+  "status": "conditional",
+  "answer": "Dify is relevant enough for a bounded local pilot, but adoption and deployment remain blocked until qualified license review, runtime validation, operations review, and security review are complete.",
+  "dossier": {
+    "id": "5fefbbdc-89ae-4a39-a051-1ae64f2a156f",
+    "revision": 2,
+    "digest": "sha256:c45d67a485a1e8d4a08d27a018ba08058aab6c0907af30a9eda502c5c1a86f89"
+  },
+  "route": {
+    "id": "a3f61477-8dc1-4b0e-bcbf-bc7bd4ab74a2",
+    "digest": "sha256:cbf26c9538a345b93571157e42e397ef4ac457d7683e72ce6eba954ffdb609c5"
+  },
+  "modules": [
+    {
+      "moduleId": "assess-self-hosted-dify",
+      "version": "0.2.0",
+      "digest": "sha256:ae40456832a12e75a337ea00949ca11b226441ab04bef1928c6b066947abafa9",
+      "title": "Assess Dify through a bounded evidence-first pilot"
+    }
+  ],
+  "citations": [
+    {
+      "evidenceId": "ev-revision",
+      "title": "Pinned Dify main revision observation",
+      "resourceRef": "git+https://github.com/langgenius/dify.git#commit=ad90cb911138f6b27af996c87afe34fbb5a4ed16",
+      "publicUri": "https://github.com/langgenius/dify/commit/ad90cb911138f6b27af996c87afe34fbb5a4ed16",
+      "digest": "sha256:931679421a809e6319d89facb90a90c472de65bb38a0b9b0a34c265ddd5cc30c",
+      "accessHint": "public"
+    },
+    {
+      "evidenceId": "ev-repository-metadata",
+      "title": "GitHub repository metadata observation",
+      "resourceRef": "atlasrepo-example:dify-public-repository-evidence-2026-09-05#ev-repository-metadata",
+      "publicUri": "https://github.com/langgenius/dify",
+      "digest": "sha256:f8f51f34134d9750bc6641fe8cbb900ce4958524a48f1e5a0932a2ddffd71526",
+      "accessHint": "public"
+    },
+    {
+      "evidenceId": "ev-readme",
+      "title": "Dify README at pinned revision",
+      "resourceRef": "github:langgenius/dify@ad90cb911138f6b27af996c87afe34fbb5a4ed16:README.md",
+      "publicUri": "https://github.com/langgenius/dify/blob/ad90cb911138f6b27af996c87afe34fbb5a4ed16/README.md",
+      "digest": "sha256:51647e1180794278e006c7e1925eec056d5b68a036893143849ef83ad695e7e2",
+      "accessHint": "public"
+    },
+    {
+      "evidenceId": "ev-license",
+      "title": "Dify modified license at pinned revision",
+      "resourceRef": "github:langgenius/dify@ad90cb911138f6b27af996c87afe34fbb5a4ed16:LICENSE",
+      "publicUri": "https://github.com/langgenius/dify/blob/ad90cb911138f6b27af996c87afe34fbb5a4ed16/LICENSE",
+      "digest": "sha256:232cf91474932d5110ed304e53b6b742a58463857c571fae803fdf2ac36d7bb3",
+      "accessHint": "public"
+    },
+    {
+      "evidenceId": "ev-security-policy",
+      "title": "Dify security policy at pinned revision",
+      "resourceRef": "github:langgenius/dify@ad90cb911138f6b27af996c87afe34fbb5a4ed16:SECURITY.md",
+      "publicUri": "https://github.com/langgenius/dify/blob/ad90cb911138f6b27af996c87afe34fbb5a4ed16/SECURITY.md",
+      "digest": "sha256:e9e3e170a9dd268aabd4700795833dec8de387113ecb449ff4a692908a2b08c4",
+      "accessHint": "public"
+    },
+    {
+      "evidenceId": "ev-compose",
+      "title": "Dify Docker Compose manifest at pinned revision",
+      "resourceRef": "github:langgenius/dify@ad90cb911138f6b27af996c87afe34fbb5a4ed16:docker/docker-compose.yaml",
+      "publicUri": "https://github.com/langgenius/dify/blob/ad90cb911138f6b27af996c87afe34fbb5a4ed16/docker/docker-compose.yaml",
+      "digest": "sha256:8644fa96677327d4af69483bc0dcdf16a21b37d4ed52aaba0e3702bea7168ba8",
+      "accessHint": "public"
+    },
+    {
+      "evidenceId": "ev-docker-readme",
+      "title": "Dify Docker deployment guide at pinned revision",
+      "resourceRef": "github:langgenius/dify@ad90cb911138f6b27af996c87afe34fbb5a4ed16:docker/README.md",
+      "publicUri": "https://github.com/langgenius/dify/blob/ad90cb911138f6b27af996c87afe34fbb5a4ed16/docker/README.md",
+      "digest": "sha256:ad4ed57b7901e35efb10a189ce6fe01b610a164885639a23a555f4e28d3e23d9",
+      "accessHint": "public"
+    },
+    {
+      "evidenceId": "ev-evidence-manifest",
+      "title": "AtlasRepo Dify evidence manifest",
+      "resourceRef": "github:Arnon-hs/atlasrepo-core@v0.2.0:examples/dify/evidence-manifest.json",
+      "publicUri": "https://github.com/Arnon-hs/atlasrepo-core/blob/v0.2.0/examples/dify/evidence-manifest.json",
+      "digest": "sha256:eebd918b2c2b3872a118ca4baa2abc41162c161a0ac4ab9782a2a65b375e482e",
+      "accessHint": "public"
+    },
+    {
+      "evidenceId": "ev-source-observations",
+      "title": "AtlasRepo Dify source observations",
+      "resourceRef": "github:Arnon-hs/atlasrepo-core@2941ffa2287991faa30c63c64d51b99cfec13e71:examples/dify/source-observations.md",
+      "publicUri": "https://github.com/Arnon-hs/atlasrepo-core/blob/2941ffa2287991faa30c63c64d51b99cfec13e71/examples/dify/source-observations.md",
+      "digest": "sha256:6a9ea449d0d554bec6044a2cb7f20232eb35a6193f71c66834c56953f9b2b2a9",
+      "accessHint": "public"
+    }
+  ],
+  "unresolvedGates": [
+    "license-review",
+    "local-runtime-pilot",
+    "operations-review",
+    "security-review"
+  ],
+  "limitations": [
+    "A disclosure policy does not establish that a release is secure or suitable for production.",
+    "A disclosure policy is not evidence that a release or deployment is secure.",
+    "A qualified human must assess the intended tenancy, branding, and distribution model.",
+    "Documented deployment procedures were not executed.",
+    "Feature and resource statements are upstream documentation claims, not runtime proof.",
+    "License analysis is technical support, not legal advice.",
+    "No Dify application code, container, migration, plugin, or network-facing service was run.",
+    "Public visibility does not determine license compatibility or runtime fitness.",
+    "Public visibility does not determine license compatibility.",
+    "Services present in the manifest may be optional and do not prove default runtime behavior.",
+    "Technical license evidence is not legal advice and requires qualified human review for the intended use.",
+    "The embedded observation is reproducible, but live repository metadata can change after the observation time.",
+    "The main branch can move after this observation; all file evidence is pinned to the observed commit.",
+    "The manifest contains source observations and does not contain runtime evidence.",
+    "The manifest was inspected as text and not applied.",
+    "The manifest was inspected as text and was not applied.",
+    "The observation records a branch head at one time; all file links remain commit-pinned.",
+    "The observations are a bounded source review, not runtime, security, or legal proof.",
+    "The timestamp is normalized to the observation date; the exact retrieval second was not retained.",
+    "This example evaluates pinned public evidence and does not authorize execution or production deployment.",
+    "This records technical evidence and is not legal advice.",
+    "Upstream feature and resource statements are not observed runtime results."
+  ]
+}
